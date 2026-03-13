@@ -44,7 +44,7 @@ async def get_pool() -> asyncpg.Pool:
 
             _connector = Connector()
 
-            async def _getconn():
+            async def _getconn(**kwargs):
                 return await _connector.connect_async(
                     CLOUD_SQL_CONNECTION_NAME,
                     "asyncpg",
