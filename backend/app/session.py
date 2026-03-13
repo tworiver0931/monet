@@ -4,6 +4,7 @@ Database layer for deployment persistence using Google Cloud SQL (PostgreSQL).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -42,7 +43,7 @@ async def get_pool() -> asyncpg.Pool:
         if CLOUD_SQL_CONNECTION_NAME:
             from .config import DB_USER, DB_PASSWORD, DB_NAME
 
-            _connector = Connector()
+            _connector = Connector(loop=asyncio.get_running_loop())
 
             async def _getconn(*args, **kwargs):
                 return await _connector.connect_async(
