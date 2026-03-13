@@ -64,7 +64,7 @@ export default function Home() {
       >
         <div className="flex grow flex-col items-center justify-center px-4">
           <span className="mb-6 inline-flex shrink-0 items-center rounded-full border-[0.5px] border-[#BABABA] px-3.5 py-1.5 text-black">
-            <span className="text-center text-base">
+            <span className="text-center text-base text-neutral-900">
               <BlurReveal as="span" delay={1.5} speedReveal={4} inView>
                 Powered by
               </BlurReveal>{" "}
@@ -94,7 +94,7 @@ export default function Home() {
           <BlurReveal
             delay={0.6}
             speedReveal={3}
-            className="mt-10 max-w-md text-center text-2xl font-medium"
+            className="mt-10 max-w-md text-center text-2xl font-medium text-neutral-900"
           >
             The realtime canvas where sketch and talk become software.
           </BlurReveal>
@@ -110,7 +110,9 @@ export default function Home() {
               className="mt-8 hover:-translate-y-0.5"
               innerClassName="min-w-[144px]"
             >
-              Start Building
+              <span className="font-semibold text-neutral-800">
+                Start Building
+              </span>
             </LiquidGlassButton>
           </motion.div>
         </div>

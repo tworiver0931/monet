@@ -11,12 +11,54 @@ export type CodeFile = {
 
 import { getExtensionForLanguage } from "@/lib/utils";
 
+export type ToolName = "generate_code" | "generate_image";
+
+export type ToolLifecyclePayload = {
+  jobId: string;
+  toolName: ToolName;
+  stage?: string;
+  message?: string;
+  summary?: string;
+  reason?: string;
+};
+
+export type CodePayload = {
+  jobId: string;
+  files: CodeFile[];
+};
+
 export type GeneratedImagePayload = {
+  jobId: string;
   url: string;
   name: string;
   mimeType?: string;
   data?: string;
 };
+
+function parseToolName(value: unknown): ToolName | null {
+  if (value === "generate_code" || value === "generate_image") {
+    return value;
+  }
+  return null;
+}
+
+function parseToolLifecyclePayload(
+  msg: Record<string, unknown>,
+): ToolLifecyclePayload | null {
+  const toolName = parseToolName(msg.toolName);
+  const jobId = typeof msg.jobId === "string" ? msg.jobId : "";
+  if (!toolName || !jobId) {
+    return null;
+  }
+  return {
+    jobId,
+    toolName,
+    stage: typeof msg.stage === "string" ? msg.stage : undefined,
+    message: typeof msg.message === "string" ? msg.message : undefined,
+    summary: typeof msg.summary === "string" ? msg.summary : undefined,
+    reason: typeof msg.reason === "string" ? msg.reason : undefined,
+  };
+}
 
 function inferLanguageFromPath(path: string): string {
   const extension = path.split(".").pop()?.toLowerCase();
@@ -72,16 +114,19 @@ function sanitizeCodeFiles(input: unknown): CodeFile[] {
 export type WSEventHandlers = {
   onAudio?: (pcmData: ArrayBuffer) => void;
   onText?: (text: string, partial: boolean) => void;
-  onCode?: (files: CodeFile[]) => void;
-  onCodeAgentStarted?: () => void;
-  onCodeAgentFinished?: () => void;
-  onImageGenerationStarted?: () => void;
-  onImageGenerationFinished?: () => void;
+  onCode?: (payload: CodePayload) => void;
+  onToolStarted?: (payload: ToolLifecyclePayload) => void;
+  onToolProgress?: (payload: ToolLifecyclePayload) => void;
+  onToolResult?: (payload: ToolLifecyclePayload) => void;
+  onToolFinished?: (payload: ToolLifecyclePayload) => void;
+  onToolCancelled?: (payload: ToolLifecyclePayload) => void;
+  onToolFailed?: (payload: ToolLifecyclePayload) => void;
   onGeneratedImage?: (image: GeneratedImagePayload) => void;
   onTurnComplete?: () => void;
   onInterrupted?: () => void;
   onSessionTimeout?: (reason: "idle" | "hard_limit") => void;
-  onError?: (message: string) => void;
+  onBackendError?: (message: string) => void;
+  onTransportError?: (message: string) => void;
   onOpen?: () => void;
   onClose?: () => void;
 };
@@ -143,7 +188,7 @@ export class MonetWebSocket {
     };
 
     this.ws.onerror = () => {
-      this.handlers.onError?.("WebSocket connection error");
+      this.handlers.onTransportError?.("WebSocket connection error");
     };
 
     this.ws.onmessage = (event: MessageEvent) => {
@@ -166,29 +211,41 @@ export class MonetWebSocket {
   }
 
   private handleMessage(msg: Record<string, unknown>): void {
-    // Custom code event from our backend
-    if (msg.type === "code_agent_started") {
-      this.handlers.onCodeAgentStarted?.();
+    const toolPayload = parseToolLifecyclePayload(msg);
+
+    if (msg.type === "tool_started" && toolPayload) {
+      this.handlers.onToolStarted?.(toolPayload);
       return;
     }
 
-    if (msg.type === "code_agent_finished") {
-      this.handlers.onCodeAgentFinished?.();
+    if (msg.type === "tool_progress" && toolPayload) {
+      this.handlers.onToolProgress?.(toolPayload);
       return;
     }
 
-    if (msg.type === "image_generation_started") {
-      this.handlers.onImageGenerationStarted?.();
+    if (msg.type === "tool_result" && toolPayload) {
+      this.handlers.onToolResult?.(toolPayload);
       return;
     }
 
-    if (msg.type === "image_generation_finished") {
-      this.handlers.onImageGenerationFinished?.();
+    if (msg.type === "tool_finished" && toolPayload) {
+      this.handlers.onToolFinished?.(toolPayload);
+      return;
+    }
+
+    if (msg.type === "tool_cancelled" && toolPayload) {
+      this.handlers.onToolCancelled?.(toolPayload);
+      return;
+    }
+
+    if (msg.type === "tool_failed" && toolPayload) {
+      this.handlers.onToolFailed?.(toolPayload);
       return;
     }
 
     if (msg.type === "generated_image") {
       this.handlers.onGeneratedImage?.({
+        jobId: typeof msg.jobId === "string" ? msg.jobId : "",
         url: typeof msg.url === "string" ? msg.url : "",
         name:
           typeof msg.name === "string" && msg.name.length > 0
@@ -206,13 +263,16 @@ export class MonetWebSocket {
     }
 
     if (msg.type === "code") {
-      this.handlers.onCode?.(sanitizeCodeFiles(msg.files));
+      this.handlers.onCode?.({
+        jobId: typeof msg.jobId === "string" ? msg.jobId : "",
+        files: sanitizeCodeFiles(msg.files),
+      });
       return;
     }
 
     // Error event from backend
     if (msg.type === "error") {
-      this.handlers.onError?.(
+      this.handlers.onBackendError?.(
         (msg.message as string) || (msg.errorCode as string) || "Unknown error",
       );
       return;

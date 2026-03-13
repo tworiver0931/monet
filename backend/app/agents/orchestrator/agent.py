@@ -9,6 +9,10 @@ from pathlib import Path
 
 from google.adk.agents import Agent
 from google.adk.tools import FunctionTool
+from google.adk.tools._function_tool_declarations import (
+    build_function_declaration_with_json_schema,
+)
+from google.genai import types
 
 from ...config import ORCHESTRATOR_MODEL
 from ..code import generate_code
@@ -18,12 +22,32 @@ ORCHESTRATOR_INSTRUCTION = (
     Path(__file__).parent / "prompts.md"
 ).read_text(encoding="utf-8")
 
+
+class JsonSchemaFunctionTool(FunctionTool):
+    """FunctionTool variant that uses Pydantic JSON schema declarations."""
+
+    def _get_declaration(self) -> types.FunctionDeclaration | None:
+        return build_function_declaration_with_json_schema(
+            self.func,
+            ignore_params=self._ignore_params,
+        )
+
+
+def stop_streaming(function_name: str) -> dict[str, str]:
+    """Stop an active streaming tool by name.
+
+    ADK intercepts this tool in live mode and cancels the named async-generator
+    tool task when it is currently running.
+    """
+    return {"status": f"Stop requested for {function_name}."}
+
 agent = Agent(
     name="monet_orchestrator",
     model=ORCHESTRATOR_MODEL,
     instruction=ORCHESTRATOR_INSTRUCTION,
     tools=[
-        FunctionTool(func=generate_code),
-        FunctionTool(func=generate_image),
+        JsonSchemaFunctionTool(func=generate_code),
+        JsonSchemaFunctionTool(func=generate_image),
+        JsonSchemaFunctionTool(func=stop_streaming),
     ],
 )

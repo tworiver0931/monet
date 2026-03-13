@@ -12,9 +12,12 @@ it either:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from typing import Literal
+import uuid
+from dataclasses import dataclass
+from typing import AsyncGenerator, Awaitable, Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -31,6 +34,14 @@ from ...utils import apply_file_actions, format_files_as_code_blocks, lang_from_
 from .tools import delete_file, edit_file, list_files, read_file, write_file
 
 logger = logging.getLogger(__name__)
+
+ToolEventEmitter = Callable[[dict[str, object]], Awaitable[None]]
+
+
+@dataclass(slots=True)
+class ToolJob:
+    job_id: str
+    tool_name: str
 
 # ---------------------------------------------------------------------------
 # Structured output schema for fast mode
@@ -156,20 +167,192 @@ _code_runner = Runner(
 
 # Maps session_id -> dict of live references (transcript, validate_fn, etc.)
 # ADK's tool_context.state may snapshot/copy values, losing live list
-# references and callables.  This registry holds the real objects.
+# references and callables. This registry holds the real objects.
 _live_state_registry: dict[str, dict] = {}
+_active_tool_jobs: dict[str, dict[str, ToolJob]] = {}
+_user_turn_ids: dict[str, int] = {}
+_tool_call_turn_ids: dict[str, dict[str, int]] = {}
+_tool_job_lock = asyncio.Lock()
 
 
 def register_live_state(session_id: str, state: dict) -> None:
     """Register live state for a session (called from main.py)."""
+    state.setdefault("latest_user_turn_id", 0)
+    state.setdefault("latest_user_turn_source", None)
+    state.setdefault("latest_user_turn_text", "")
     _live_state_registry[session_id] = state
 
 
 def unregister_live_state(session_id: str) -> None:
     """Remove live state when session ends."""
     _live_state_registry.pop(session_id, None)
+    _active_tool_jobs.pop(session_id, None)
+    _user_turn_ids.pop(session_id, None)
+    _tool_call_turn_ids.pop(session_id, None)
     # Clean up fast-mode conversation history for this session
     _fast_mode_history.pop(f"code-{session_id}", None)
+
+
+def get_live_state(session_id: str) -> dict:
+    """Return the live state dict for a session."""
+    return _live_state_registry.get(session_id, {})
+
+
+async def record_user_turn(
+    session_id: str,
+    *,
+    source: str,
+    text: str | None = None,
+) -> int:
+    """Advance the real-user turn counter for a live session."""
+    async with _tool_job_lock:
+        turn_id = _user_turn_ids.get(session_id, 0) + 1
+        _user_turn_ids[session_id] = turn_id
+
+    live = get_live_state(session_id)
+    if live:
+        live["latest_user_turn_id"] = turn_id
+        live["latest_user_turn_source"] = source
+        live["latest_user_turn_text"] = text or ""
+    return turn_id
+
+
+async def claim_tool_call_turn(
+    session_id: str,
+    tool_name: str,
+) -> tuple[bool, int, str]:
+    """Allow at most one invocation of a given tool per real user turn."""
+    async with _tool_job_lock:
+        turn_id = _user_turn_ids.get(session_id, 0)
+        if turn_id <= 0:
+            return False, turn_id, "no_user_turn"
+
+        claimed_turns = _tool_call_turn_ids.setdefault(session_id, {})
+        if claimed_turns.get(tool_name) == turn_id:
+            return False, turn_id, "already_used"
+
+        claimed_turns[tool_name] = turn_id
+        return True, turn_id, "claimed"
+
+
+async def begin_tool_job(
+    session_id: str,
+    tool_name: str,
+    job_id: str,
+) -> ToolJob | None:
+    """Mark a tool job as the current active job for this tool."""
+    async with _tool_job_lock:
+        session_jobs = _active_tool_jobs.setdefault(session_id, {})
+        previous = session_jobs.get(tool_name)
+        session_jobs[tool_name] = ToolJob(job_id=job_id, tool_name=tool_name)
+        return previous
+
+
+def is_current_tool_job(session_id: str, tool_name: str, job_id: str) -> bool:
+    """Check whether a job is still the current active job for this tool."""
+    session_jobs = _active_tool_jobs.get(session_id)
+    if session_jobs is None:
+        return False
+    job = session_jobs.get(tool_name)
+    return job is not None and job.job_id == job_id
+
+
+async def clear_tool_job(session_id: str, tool_name: str, job_id: str) -> None:
+    """Clear the active tool job if it still matches for this tool."""
+    async with _tool_job_lock:
+        session_jobs = _active_tool_jobs.get(session_id)
+        if session_jobs is None:
+            return
+        job = session_jobs.get(tool_name)
+        if job is not None and job.job_id == job_id:
+            session_jobs.pop(tool_name, None)
+            if not session_jobs:
+                _active_tool_jobs.pop(session_id, None)
+
+
+def get_tool_job_id(tool_context: ToolContext, tool_name: str) -> str:
+    """Derive a stable job id for a tool invocation."""
+    return tool_context.function_call_id or f"{tool_name}-{uuid.uuid4().hex}"
+
+
+async def emit_client_event(session_id: str, payload: dict[str, object]) -> None:
+    """Emit a custom JSON event to the active websocket client."""
+    live = get_live_state(session_id)
+    emitter = live.get("emit_client_event")
+    if not callable(emitter):
+        return
+    try:
+        await emitter(payload)
+    except Exception:
+        logger.debug("Failed to emit client event for session %s", session_id, exc_info=True)
+
+
+async def emit_tool_event(
+    session_id: str,
+    *,
+    event_type: str,
+    tool_name: str,
+    job_id: str,
+    stage: str | None = None,
+    message: str | None = None,
+    **extra: object,
+) -> None:
+    """Emit a standardized tool lifecycle event to the browser."""
+    payload: dict[str, object] = {
+        "type": event_type,
+        "toolName": tool_name,
+        "jobId": job_id,
+    }
+    if stage:
+        payload["stage"] = stage
+    if message:
+        payload["message"] = message
+    payload.update(extra)
+    await emit_client_event(session_id, payload)
+
+
+async def _cancel_background_task(task: asyncio.Task) -> None:
+    """Cancel a background task and swallow the expected cancellation error."""
+    if task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.debug("Background task cancellation raised an error", exc_info=True)
+
+
+async def wait_for_task_heartbeats(
+    *,
+    task: asyncio.Task,
+    session_id: str,
+    job_id: str,
+    tool_name: str,
+    stage: str,
+    client_message: str,
+    interval_seconds: float = 4.0,
+) -> None:
+    """Emit periodic heartbeat updates while a background task is pending."""
+    while not task.done():
+        if not is_current_tool_job(session_id, tool_name, job_id):
+            await _cancel_background_task(task)
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            if not is_current_tool_job(session_id, tool_name, job_id):
+                await _cancel_background_task(task)
+                return
+            await emit_tool_event(
+                session_id,
+                event_type="tool_progress",
+                tool_name=tool_name,
+                job_id=job_id,
+                stage=stage,
+                message=client_message,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -184,11 +367,6 @@ _fast_mode_history: dict[str, list[types.Content]] = {}
 # ---------------------------------------------------------------------------
 # Streaming FunctionTool wrapper (called by the Main Agent)
 # ---------------------------------------------------------------------------
-
-
-# Guard against duplicate concurrent calls from the orchestrator.
-# Maps orchestrator session_id -> True while generate_code is running.
-_active_generate: dict[str, bool] = {}
 
 
 def _build_user_message_with_files(
@@ -330,7 +508,7 @@ async def _fast_generate(
 
 async def generate_code(
     prompt: str, tool_context: ToolContext, **kwargs
-):
+) -> AsyncGenerator[str, None]:
     """Generates or refines a React application.
 
     Args:
@@ -339,19 +517,52 @@ async def generate_code(
     Returns:
         A brief summary what was done
     """
+    del kwargs
     fast_mode = CODE_FAST_MODE
     model = CODE_GEN_FAST_MODEL if fast_mode else CODE_GEN_MODEL
-    logger.info("Code agent using %s model (fast_mode=%s)", model, fast_mode)
-
-    # Prevent duplicate concurrent calls from the orchestrator
+    tool_name = "generate_code"
     orchestrator_session_id = tool_context.session.id
-    if _active_generate.get(orchestrator_session_id):
-        logger.info("generate_code already running for session %s, skipping duplicate call", orchestrator_session_id)
-        return (
-            "Code generation is already in progress. Wait for it to finish before "
-            "calling generate_code again."
+    job_id = get_tool_job_id(tool_context, tool_name)
+    logger.info("Code agent using %s model (fast_mode=%s)", model, fast_mode)
+    turn_claimed, turn_id, turn_reason = await claim_tool_call_turn(
+        orchestrator_session_id,
+        tool_name,
+    )
+    if not turn_claimed:
+        live = get_live_state(orchestrator_session_id)
+        logger.info(
+            "Suppressing %s for session %s without a new user turn "
+            "(reason=%s, turn_id=%s, source=%s)",
+            tool_name,
+            orchestrator_session_id,
+            turn_reason,
+            turn_id,
+            live.get("latest_user_turn_source"),
         )
-    _active_generate[orchestrator_session_id] = True
+        return
+
+    job_cleared = False
+    generate_task: asyncio.Task | None = None
+    previous_job = await begin_tool_job(orchestrator_session_id, tool_name, job_id)
+    if previous_job is not None and previous_job.job_id != job_id:
+        await emit_tool_event(
+            orchestrator_session_id,
+            event_type="tool_cancelled",
+            tool_name=previous_job.tool_name,
+            job_id=previous_job.job_id,
+            stage="cancelled",
+            message="Superseded by a newer tool request.",
+            reason="superseded",
+        )
+
+    await emit_tool_event(
+        orchestrator_session_id,
+        event_type="tool_started",
+        tool_name=tool_name,
+        job_id=job_id,
+        stage="started",
+        message="Working on the requested app changes.",
+    )
 
     try:
         # Derive a code-agent session ID from the main session
@@ -359,17 +570,12 @@ async def generate_code(
         user_id = tool_context.user_id
 
         # Read live state from module-level registry
-        live = _live_state_registry.get(orchestrator_session_id, {})
-        notify_code_agent_started = live.get("notify_code_agent_started")
-
+        live = get_live_state(orchestrator_session_id)
         code_files = live.get("code_files", [])
         uploaded_images = live.get("uploaded_images", [])
         transcript = live.get("transcript", [])
         latest_frame = live.get("latest_frame")
         latest_mime = live.get("latest_frame_mime", "image/jpeg")
-
-        if notify_code_agent_started:
-            await notify_code_agent_started()
 
         if fast_mode:
             # ----- Fast mode: single LLM call, structured JSON output -----
@@ -394,14 +600,29 @@ async def generate_code(
                     "The voice assistant is requesting the following:\n\n" + prompt
                 )
 
-            updated_files, summary = await _fast_generate(
-                prompt_text,
-                code_files,
-                uploaded_images,
-                latest_frame,
-                latest_mime,
-                session_id=code_session_id,
+            generate_task = asyncio.create_task(
+                _fast_generate(
+                    prompt_text,
+                    code_files,
+                    uploaded_images,
+                    latest_frame,
+                    latest_mime,
+                    session_id=code_session_id,
+                )
             )
+            await wait_for_task_heartbeats(
+                task=generate_task,
+                session_id=orchestrator_session_id,
+                job_id=job_id,
+                tool_name=tool_name,
+                stage="generating",
+                client_message="Still generating the code update.",
+            )
+
+            if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+                return
+
+            updated_files, summary = await generate_task
 
             # Log generated code
             for f in updated_files:
@@ -411,86 +632,217 @@ async def generate_code(
                     f.get("code", ""),
                 )
 
-            # Update state
+            if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+                return
+
+            await emit_tool_event(
+                orchestrator_session_id,
+                event_type="tool_progress",
+                tool_name=tool_name,
+                job_id=job_id,
+                stage="applying",
+                message="Applying the generated code to the preview.",
+            )
+
             tool_context.state["code_files"] = updated_files
             live["code_files"] = updated_files
 
-            return summary or "Code generation complete."
+            final_summary = summary or "Code generation complete."
+            await emit_tool_event(
+                orchestrator_session_id,
+                event_type="tool_result",
+                tool_name=tool_name,
+                job_id=job_id,
+                stage="code_ready",
+                message="Updated code files are ready.",
+                summary=final_summary,
+            )
+            await emit_client_event(
+                orchestrator_session_id,
+                {
+                    "type": "code",
+                    "toolName": tool_name,
+                    "jobId": job_id,
+                    "files": updated_files,
+                },
+            )
+            await emit_tool_event(
+                orchestrator_session_id,
+                event_type="tool_finished",
+                tool_name=tool_name,
+                job_id=job_id,
+                stage="finished",
+                message=final_summary,
+                summary=final_summary,
+            )
+            await clear_tool_job(orchestrator_session_id, tool_name, job_id)
+            job_cleared = True
+            yield f"[ToolComplete] generate_code: {final_summary}"
+            return
 
-        else:
-            # ----- Agent mode: full ADK agent with tools -----
+        # ----- Agent mode: full ADK agent with tools -----
 
-            session = await _code_session_service.get_session(
+        session = await _code_session_service.get_session(
+            app_name="code_agent",
+            user_id=user_id,
+            session_id=code_session_id,
+        )
+        if session is None:
+            session = await _code_session_service.create_session(
                 app_name="code_agent",
                 user_id=user_id,
                 session_id=code_session_id,
+                state={
+                    "code_files": code_files,
+                    "uploaded_images": uploaded_images,
+                    "_transcript_offset": 0,
+                },
             )
-            if session is None:
-                session = await _code_session_service.create_session(
-                    app_name="code_agent",
-                    user_id=user_id,
-                    session_id=code_session_id,
-                    state={
-                        "code_files": code_files,
-                        "uploaded_images": uploaded_images,
-                        "_transcript_offset": 0,
-                    },
-                )
-            else:
-                session.state["code_files"] = code_files
-                session.state["uploaded_images"] = uploaded_images
+        else:
+            session.state["code_files"] = code_files
+            session.state["uploaded_images"] = uploaded_images
 
-            # Build the user message with new conversation context prepended.
-            offset = session.state.get("_transcript_offset", 0)
-            new_entries = list(transcript)[offset:]
-            session.state["_transcript_offset"] = len(transcript)
-            logger.info(
-                "Transcript debug: session=%s, total=%d, offset=%d, new_entries=%d",
-                orchestrator_session_id, len(transcript), offset, len(new_entries),
+        # Build the user message with new conversation context prepended.
+        offset = session.state.get("_transcript_offset", 0)
+        new_entries = list(transcript)[offset:]
+        session.state["_transcript_offset"] = len(transcript)
+        logger.info(
+            "Transcript debug: session=%s, total=%d, offset=%d, new_entries=%d",
+            orchestrator_session_id,
+            len(transcript),
+            offset,
+            len(new_entries),
+        )
+
+        if new_entries:
+            prompt_text = (
+                "The following conversation took place between the user and the "
+                "voice assistant since your last invocation:\n\n"
+                + "\n".join(new_entries)
+                + "\n\n"
+                "Based on the above conversation, the voice assistant is now "
+                "requesting the following:\n\n"
+                + prompt
+            )
+        else:
+            prompt_text = (
+                "The voice assistant is requesting the following:\n\n" + prompt
             )
 
-            if new_entries:
-                prompt_text = (
-                    "The following conversation took place between the user and the "
-                    "voice assistant since your last invocation:\n\n"
-                    + "\n".join(new_entries)
-                    + "\n\n"
-                    "Based on the above conversation, the voice assistant is now "
-                    "requesting the following:\n\n"
-                    + prompt
-                )
-            else:
-                prompt_text = (
-                    "The voice assistant is requesting the following:\n\n" + prompt
-                )
-
-            msg_parts = [types.Part(text=prompt_text)]
-            if latest_frame:
-                msg_parts.append(
-                    types.Part(
-                        inline_data=types.Blob(
-                            mime_type=latest_mime,
-                            data=latest_frame,
-                        )
+        msg_parts = [types.Part(text=prompt_text)]
+        if latest_frame:
+            msg_parts.append(
+                types.Part(
+                    inline_data=types.Blob(
+                        mime_type=latest_mime,
+                        data=latest_frame,
                     )
                 )
-            current_msg = types.Content(role="user", parts=msg_parts)
-            summary = ""
+            )
+        current_msg = types.Content(role="user", parts=msg_parts)
+        summary = ""
 
-            async for event in _code_runner.run_async(
-                user_id=user_id,
-                session_id=code_session_id,
-                new_message=current_msg,
-            ):
-                if event.actions and event.actions.state_delta:
-                    new_files = event.actions.state_delta.get("code_files")
-                    if new_files is not None:
-                        tool_context.state["code_files"] = new_files
-                        live["code_files"] = new_files
+        await emit_tool_event(
+            orchestrator_session_id,
+            event_type="tool_progress",
+            tool_name=tool_name,
+            job_id=job_id,
+            stage="generating",
+            message="The code agent is updating the app.",
+        )
 
-                if event.is_final_response() and event.content and event.content.parts:
-                    summary = "".join(p.text for p in event.content.parts if p.text)
+        async for event in _code_runner.run_async(
+            user_id=user_id,
+            session_id=code_session_id,
+            new_message=current_msg,
+        ):
+            if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+                return
 
-            return summary or "Code generation complete."
+            if event.actions and event.actions.state_delta:
+                new_files = event.actions.state_delta.get("code_files")
+                if new_files is not None:
+                    tool_context.state["code_files"] = new_files
+                    live["code_files"] = new_files
+                    await emit_tool_event(
+                        orchestrator_session_id,
+                        event_type="tool_result",
+                        tool_name=tool_name,
+                        job_id=job_id,
+                        stage="code_ready",
+                        message="Updated code files are ready.",
+                    )
+                    await emit_client_event(
+                        orchestrator_session_id,
+                        {
+                            "type": "code",
+                            "toolName": tool_name,
+                            "jobId": job_id,
+                            "files": new_files,
+                        },
+                    )
+
+            if event.is_final_response() and event.content and event.content.parts:
+                summary = "".join(p.text for p in event.content.parts if p.text)
+
+        if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            return
+
+        final_summary = summary or "Code generation complete."
+        await emit_tool_event(
+            orchestrator_session_id,
+            event_type="tool_finished",
+            tool_name=tool_name,
+            job_id=job_id,
+            stage="finished",
+            message=final_summary,
+            summary=final_summary,
+        )
+        await clear_tool_job(orchestrator_session_id, tool_name, job_id)
+        job_cleared = True
+        yield f"[ToolComplete] generate_code: {final_summary}"
+    except asyncio.CancelledError:
+        if generate_task is not None:
+            try:
+                await asyncio.shield(_cancel_background_task(generate_task))
+            except Exception:
+                logger.debug("Failed to cancel fast code task", exc_info=True)
+        if is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            try:
+                await asyncio.shield(
+                    emit_tool_event(
+                        orchestrator_session_id,
+                        event_type="tool_cancelled",
+                        tool_name=tool_name,
+                        job_id=job_id,
+                        stage="cancelled",
+                        message="Stopped the code task.",
+                        reason="cancelled",
+                    )
+                )
+            except Exception:
+                logger.debug("Failed to emit code cancellation event", exc_info=True)
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Code generation failed for session %s", orchestrator_session_id
+        )
+        if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            return
+        await emit_tool_event(
+            orchestrator_session_id,
+            event_type="tool_failed",
+            tool_name=tool_name,
+            job_id=job_id,
+            stage="failed",
+            message=str(exc),
+            reason="error",
+        )
+        await clear_tool_job(orchestrator_session_id, tool_name, job_id)
+        job_cleared = True
+        yield "[ToolError] generate_code: Code generation failed before completion."
     finally:
-        _active_generate.pop(orchestrator_session_id, None)
+        if generate_task is not None and not generate_task.done():
+            await _cancel_background_task(generate_task)
+        if not job_cleared:
+            await clear_tool_job(orchestrator_session_id, tool_name, job_id)

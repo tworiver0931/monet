@@ -5,18 +5,18 @@ Database layer for deployment persistence using Google Cloud SQL (PostgreSQL).
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 
 import asyncpg
-from google.cloud.sql.connector import Connector
 
 from .config import DATABASE_URL, CLOUD_SQL_CONNECTION_NAME
 
 logger = logging.getLogger(__name__)
 
 _pool: asyncpg.Pool | None = None
-_connector: Connector | None = None
+_connector: object | None = None
 
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS deployment (
@@ -37,12 +37,25 @@ CREATE INDEX IF NOT EXISTS idx_deployment_slug ON deployment (slug);
 """
 
 
+def _get_cloud_sql_connector_class():
+    try:
+        module = importlib.import_module("google.cloud.sql.connector")
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Cloud SQL connector is not installed. Install "
+            "'cloud-sql-python-connector[asyncpg]' to use "
+            "CLOUD_SQL_CONNECTION_NAME."
+        ) from exc
+    return module.Connector
+
+
 async def get_pool() -> asyncpg.Pool:
     global _pool, _connector
     if _pool is None:
         if CLOUD_SQL_CONNECTION_NAME:
             from .config import DB_USER, DB_PASSWORD, DB_NAME
 
+            Connector = _get_cloud_sql_connector_class()
             _connector = Connector(loop=asyncio.get_running_loop())
 
             async def _getconn(*args, **kwargs):

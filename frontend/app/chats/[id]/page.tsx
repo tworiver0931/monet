@@ -85,7 +85,9 @@ export default function Page() {
     sendImageUpload,
     sendRuntimeError,
     connectionState,
-    codeFiles,
+    codeJob,
+    imageJob,
+    codeResult,
     streamText,
     isCodeAgentGenerating,
     isImageGenerating,
@@ -98,6 +100,22 @@ export default function Page() {
   const [pendingPreviewVersion, setPendingPreviewVersion] = useState<
     number | null
   >(null);
+
+  const activeCodeResult =
+    codeResult &&
+    codeJob?.jobId === codeResult.jobId &&
+    codeJob.status !== "cancelled" &&
+    codeJob.status !== "failed"
+      ? codeResult
+      : null;
+
+  const activeGeneratedImage =
+    generatedImage &&
+    imageJob?.jobId === generatedImage.jobId &&
+    imageJob.status !== "cancelled" &&
+    imageJob.status !== "failed"
+      ? generatedImage
+      : null;
 
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop();
@@ -212,8 +230,11 @@ export default function Page() {
 
   // When code files arrive from WebSocket
   useLayoutEffect(() => {
-    applyFiles(codeFiles, { awaitPreview: true });
-  }, [applyFiles, codeFiles]);
+    if (!activeCodeResult) {
+      return;
+    }
+    applyFiles(activeCodeResult.files, { awaitPreview: true });
+  }, [activeCodeResult, applyFiles]);
 
   // Extract code from streamed text — only parse when at least one
   // complete fenced block exists (opening + closing ```).
@@ -333,7 +354,7 @@ export default function Page() {
           renderBottomBar={shouldRenderBottomBar}
           showGenerationGlow={showGenerationGlow}
           isImageGenerating={isImageGenerating}
-          generatedImage={generatedImage}
+          generatedImage={activeGeneratedImage}
           onGeneratedImageApplied={clearGeneratedImage}
           previewRenderVersion={previewRenderVersion}
           onPreviewRendered={handlePreviewRendered}

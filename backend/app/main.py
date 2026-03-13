@@ -25,8 +25,8 @@ from .schemas import DeployRequest, DeployResponse
 from .session import init_db, close_pool, create_deployment, get_deployment_by_slug
 from .agents import agent
 from .agents.code.agent import (
-    _active_generate,
     _live_state_registry,
+    record_user_turn,
     register_live_state,
     unregister_live_state,
 )
@@ -93,7 +93,7 @@ app.add_middleware(
 )
 
 class _CodeInterceptQueue(LiveRequestQueue):
-    """LiveRequestQueue wrapper that relays code-agent lifecycle events."""
+    """LiveRequestQueue wrapper that can emit custom client events."""
 
     def __init__(self, websocket: WebSocket, ws_lock: asyncio.Lock):
         super().__init__()
@@ -101,16 +101,16 @@ class _CodeInterceptQueue(LiveRequestQueue):
         self._ws_lock = ws_lock
         self._transcript: collections.deque[str] = collections.deque(maxlen=50)
 
-    async def notify_code_agent_started(self) -> None:
+    async def emit_client_event(self, payload: dict[str, object]) -> None:
         try:
             async with self._ws_lock:
                 await self._websocket.send_text(
-                    json.dumps({"type": "code_agent_started"})
+                    json.dumps(payload)
                 )
         except RuntimeError:
-            logger.debug("Skipping code agent start event on closed websocket")
+            logger.debug("Skipping client event on closed websocket")
         except Exception as exc:
-            logger.debug("Failed to send code agent start event: %s", exc)
+            logger.debug("Failed to send client event: %s", exc)
 
 
 async def timeout_task(
@@ -186,12 +186,6 @@ async def upstream_task(
                 break
 
             if "bytes" in data and data["bytes"]:
-                if _active_generate.get(session_id):
-                    logger.debug(
-                        "Dropping user audio while generate_code is running for session %s",
-                        session_id,
-                    )
-                    continue
                 audio_data = data["bytes"]
                 audio_blob = types.Blob(
                     mime_type="audio/pcm;rate=16000",
@@ -221,7 +215,9 @@ async def upstream_task(
                             "The generated code produced a runtime error in the "
                             "browser preview:\n\n"
                             f"```\n{error_msg}\n```\n\n"
-                            "Please call generate_code to fix this error."
+                            "Briefly explain the problem to the user in plain "
+                            "language. Do not call generate_code unless the "
+                            "user asks you to fix it or explicitly approves a fix."
                         ))],
                     )
                     live_request_queue.send_content(content)
@@ -229,6 +225,11 @@ async def upstream_task(
                 elif msg_type == "text":
                     text_content = msg.get("text", "")
                     if text_content:
+                        await record_user_turn(
+                            session_id,
+                            source="text",
+                            text=text_content,
+                        )
                         content = types.Content(
                             role="user",
                             parts=[types.Part(text=text_content)],
@@ -304,16 +305,13 @@ async def downstream_task(
         retryable_codes = {1008, 1011}
         max_retries = 2
         attempt = 0
+        speech_turn_open = False
 
         while True:
             if not _is_session_owner(session_id, connection_id):
                 return
 
             try:
-                code_agent_started_sent = False
-                code_agent_finished_sent = False
-                image_generation_started_sent = False
-                image_generation_finished_sent = False
                 async for event in adk_runner.run_live(
                     user_id=user_id,
                     session_id=session_id,
@@ -383,14 +381,26 @@ async def downstream_task(
                     # Accumulate conversation transcript from audio
                     # transcriptions (not model thinking text).
                     transcript = live_request_queue._transcript
-                    if (
-                        getattr(event, "input_transcription", None)
-                        and event.input_transcription.text
-                        and not getattr(event, "partial", True)
-                    ):
-                        transcript.append(
-                            f"user: {event.input_transcription.text}"
-                        )
+                    input_transcription = getattr(event, "input_transcription", None)
+                    input_text = getattr(input_transcription, "text", "") or ""
+                    is_partial = getattr(event, "partial", True)
+                    if input_text:
+                        if not speech_turn_open:
+                            await record_user_turn(
+                                session_id,
+                                source="speech",
+                                text=input_text,
+                            )
+                            speech_turn_open = True
+                        elif not is_partial:
+                            live = _live_state_registry.get(session_id)
+                            if live is not None:
+                                live["latest_user_turn_text"] = input_text
+
+                        if not is_partial:
+                            transcript.append(f"user: {input_text}")
+                            speech_turn_open = False
+
                     if (
                         getattr(event, "output_transcription", None)
                         and event.output_transcription.text
@@ -400,99 +410,8 @@ async def downstream_task(
                             f"assistant: {event.output_transcription.text}"
                         )
 
-                    if event.content and event.content.parts:
-                        for part in event.content.parts:
-                            function_call = getattr(part, "function_call", None)
-                            function_call_name = getattr(function_call, "name", None)
-                            if (
-                                function_call_name == "generate_code"
-                                and not code_agent_started_sent
-                            ):
-                                async with ws_lock:
-                                    await websocket.send_text(
-                                        json.dumps({"type": "code_agent_started"})
-                                    )
-                                code_agent_started_sent = True
-
-                            if (
-                                function_call_name == "generate_image"
-                                and not image_generation_started_sent
-                            ):
-                                async with ws_lock:
-                                    await websocket.send_text(
-                                        json.dumps({"type": "image_generation_started"})
-                                    )
-                                image_generation_started_sent = True
-
-                            if part.function_response:
-                                response = getattr(part.function_response, "response", None)
-                                response_name = getattr(part.function_response, "name", None)
-                                if (
-                                    response_name == "generate_code"
-                                    and not code_agent_started_sent
-                                ):
-                                    async with ws_lock:
-                                        await websocket.send_text(
-                                            json.dumps({"type": "code_agent_started"})
-                                        )
-                                    code_agent_started_sent = True
-
-                                if (
-                                    response_name == "generate_image"
-                                    and not image_generation_started_sent
-                                ):
-                                    async with ws_lock:
-                                        await websocket.send_text(
-                                            json.dumps({"type": "image_generation_started"})
-                                        )
-                                    image_generation_started_sent = True
-
-                                if response_name == "generate_code":
-                                    live = _live_state_registry.get(session_id, {})
-                                    code_files = live.get("code_files", [])
-                                    if code_files:
-                                        code_msg = json.dumps({
-                                            "type": "code",
-                                            "files": code_files,
-                                        })
-                                        async with ws_lock:
-                                            await websocket.send_text(code_msg)
-                                if (
-                                    code_agent_started_sent
-                                    and not code_agent_finished_sent
-                                    and response_name == "generate_code"
-                                    and response is not None
-                                ):
-                                    async with ws_lock:
-                                        await websocket.send_text(
-                                            json.dumps({"type": "code_agent_finished"})
-                                        )
-                                    code_agent_finished_sent = True
-
-                                if response_name == "generate_image":
-                                    live = _live_state_registry.get(session_id, {})
-                                    generated_image = live.pop("pending_generated_image", None)
-                                    if generated_image:
-                                        generated_image_msg = json.dumps({
-                                            "type": "generated_image",
-                                            **generated_image,
-                                        })
-                                        async with ws_lock:
-                                            await websocket.send_text(generated_image_msg)
-
-                                if (
-                                    image_generation_started_sent
-                                    and not image_generation_finished_sent
-                                    and response_name == "generate_image"
-                                    and response is not None
-                                ):
-                                    async with ws_lock:
-                                        await websocket.send_text(
-                                            json.dumps({
-                                                "type": "image_generation_finished"
-                                            })
-                                        )
-                                    image_generation_finished_sent = True
+                    if getattr(event, "turn_complete", False):
+                        speech_turn_open = False
 
                 return
             except genai_errors.APIError as e:
@@ -554,7 +473,7 @@ async def websocket_endpoint(
     # losing list references and callables).
     live_state = {
         "transcript": live_request_queue._transcript,
-        "notify_code_agent_started": live_request_queue.notify_code_agent_started,
+        "emit_client_event": live_request_queue.emit_client_event,
         "code_files": session.state.get("code_files", []),
         "uploaded_images": session.state.get("uploaded_images", []),
         "latest_frame": None,
@@ -566,7 +485,6 @@ async def websocket_endpoint(
             "_latest_image_generation_frame_mime",
             "image/png",
         ),
-        "pending_generated_image": None,
     }
     register_live_state(session_id, live_state)
 
