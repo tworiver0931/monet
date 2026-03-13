@@ -24,3 +24,4 @@ backend/tmp/
 
 # Claude
 .claude/
+.vercel

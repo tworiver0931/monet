@@ -34,8 +34,12 @@ GCS_BUCKET = os.getenv("GCS_BUCKET", "")
 SESSION_IDLE_TIMEOUT = int(os.getenv("SESSION_IDLE_TIMEOUT", "300"))  # 5 minutes
 SESSION_HARD_LIMIT = int(os.getenv("SESSION_HARD_LIMIT", "1200"))  # 20 minutes
 
-FRONTEND_ORIGINS = [
+_default_origins = [
     "http://localhost:3000",
     "http://localhost:3001",
     "http://127.0.0.1:3000",
+]
+_extra_origins = os.getenv("FRONTEND_ORIGINS", "")
+FRONTEND_ORIGINS = _default_origins + [
+    o.strip() for o in _extra_origins.split(",") if o.strip()
 ]
