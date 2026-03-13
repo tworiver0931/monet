@@ -6,6 +6,9 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 CLOUD_SQL_CONNECTION_NAME = os.getenv("CLOUD_SQL_CONNECTION_NAME", "")
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_NAME = os.getenv("DB_NAME", "monet")
 
 # Vertex AI ADC: requires gcloud auth application-default login
 # and GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION set.

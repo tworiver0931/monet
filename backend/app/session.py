@@ -8,12 +8,14 @@ import json
 import logging
 
 import asyncpg
+from google.cloud.sql.connector import Connector
 
 from .config import DATABASE_URL, CLOUD_SQL_CONNECTION_NAME
 
 logger = logging.getLogger(__name__)
 
 _pool: asyncpg.Pool | None = None
+_connector: Connector | None = None
 
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS deployment (
@@ -35,25 +37,40 @@ CREATE INDEX IF NOT EXISTS idx_deployment_slug ON deployment (slug);
 
 
 async def get_pool() -> asyncpg.Pool:
-    global _pool
+    global _pool, _connector
     if _pool is None:
-        connect_kwargs: dict = {
-            "min_size": 1,
-            "max_size": 5,
-            "command_timeout": 30,
-        }
-
         if CLOUD_SQL_CONNECTION_NAME:
-            # When using Cloud SQL Auth Proxy (localhost TCP), no SSL needed.
-            # The proxy handles authentication and encryption.
-            connect_kwargs["dsn"] = DATABASE_URL
+            from .config import DB_USER, DB_PASSWORD, DB_NAME
+
+            _connector = Connector()
+
+            async def _getconn():
+                return await _connector.connect_async(
+                    CLOUD_SQL_CONNECTION_NAME,
+                    "asyncpg",
+                    user=DB_USER,
+                    password=DB_PASSWORD,
+                    db=DB_NAME,
+                )
+
+            _pool = await asyncpg.create_pool(
+                connect=_getconn,
+                min_size=1,
+                max_size=5,
+                command_timeout=30,
+            )
         elif DATABASE_URL:
-            connect_kwargs["dsn"] = DATABASE_URL
-            # Remote connections (e.g. direct Cloud SQL public IP) may need SSL
+            connect_kwargs: dict = {
+                "dsn": DATABASE_URL,
+                "min_size": 1,
+                "max_size": 5,
+                "command_timeout": 30,
+            }
             if "localhost" not in DATABASE_URL and "127.0.0.1" not in DATABASE_URL:
                 connect_kwargs["ssl"] = "require"
-
-        _pool = await asyncpg.create_pool(**connect_kwargs)
+            _pool = await asyncpg.create_pool(**connect_kwargs)
+        else:
+            raise RuntimeError("No database configuration provided")
     return _pool
 
 
