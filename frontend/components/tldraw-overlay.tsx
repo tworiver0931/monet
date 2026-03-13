@@ -143,6 +143,7 @@ export default function TldrawOverlay({
         }
       `}</style>
       <Tldraw
+        licenseKey={process.env.NEXT_PUBLIC_TLDRAW_LICENSE_KEY}
         hideUi
         assets={assetStore}
         components={{ Background: TransparentBackground }}
