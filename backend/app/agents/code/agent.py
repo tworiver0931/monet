@@ -553,7 +553,6 @@ async def _fast_generate(
         )
 
     response_text = response.text or "{}"
-    logger.info("Fast mode raw response length: %d chars", len(response_text))
 
     # Parse structured response
     try:
@@ -621,7 +620,7 @@ async def generate_code(
     tool_name = "generate_code"
     orchestrator_session_id = tool_context.session.id
     job_id = get_tool_job_id(tool_context, tool_name)
-    logger.info("Code agent using %s model (fast_mode=%s)", model, fast_mode)
+
     turn_claimed, turn_id, turn_reason = await claim_tool_call_turn(
         orchestrator_session_id,
         tool_name,
@@ -723,14 +722,6 @@ async def generate_code(
                 return
 
             updated_files, summary = await generate_task
-
-            # Log generated code
-            for f in updated_files:
-                logger.info(
-                    "Fast mode generated file [%s]:\n%s",
-                    f.get("path", "unknown"),
-                    f.get("code", ""),
-                )
 
             if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
                 yield "[ToolComplete] generate_code: Superseded by a newer request."
