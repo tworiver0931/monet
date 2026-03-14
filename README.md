@@ -31,67 +31,9 @@ Monet reimagines software creation as a conversation. Instead of typing prompts 
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                   Frontend (Next.js)                     │
-│                                                          │
-│  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐  │
-│  │   tldraw    │  │    Voice     │  │   Sandpack     │  │
-│  │   Canvas    │  │   Controls   │  │  Live Preview  │  │
-│  └─────────────┘  └──────────────┘  └────────────────┘  │
-│                          │                               │
-│              WebSocket (binary PCM + JSON)                │
-└──────────────────────────┬───────────────────────────────┘
-                           │
-                    Cloud Run (GCP)
-                           │
-┌──────────────────────────┴───────────────────────────────┐
-│                  Backend (FastAPI + ADK)                  │
-│                                                          │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │          Orchestrator Agent (Gemini Live)          │  │
-│  │   Model: gemini-live-2.5-flash-native-audio       │  │
-│  │   Mode: BIDI streaming with voice I/O             │  │
-│  │                                                    │  │
-│  │   - Real-time speech recognition & synthesis       │  │
-│  │   - Multimodal input (voice + canvas + images)     │  │
-│  │   - Natural interruption handling (barge-in)       │  │
-│  │   - Affective dialog & proactive audio             │  │
-│  └──────────┬────────────────────────┬───────────────┘  │
-│             │                        │                   │
-│  ┌──────────▼──────────┐  ┌─────────▼─────────────┐    │
-│  │    Code Agent       │  │    Image Agent         │    │
-│  │                     │  │                        │    │
-│  │ gemini-3-flash      │  │ gemini-3.1-flash       │    │
-│  │                     │  │ -image-preview         │    │
-│  │ Tools:              │  │                        │    │
-│  │ - list_files        │  │ Canvas frame →         │    │
-│  │ - read_file         │  │ polished image →       │    │
-│  │ - write_file        │  │ upload to GCS          │    │
-│  │ - edit_file         │  │                        │    │
-│  │ - delete_file       │  │                        │    │
-│  └─────────────────────┘  └────────────────────────┘    │
-│                                                          │
-└──────────────────────────┬───────────────────────────────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-   ┌────▼─────┐    ┌──────▼──────┐    ┌──────▼──────┐
-   │ Vertex AI│    │  Cloud SQL  │    │    GCS      │
-   │ (Models) │    │ (PostgreSQL)│    │  (Storage)  │
-   └──────────┘    └─────────────┘    └─────────────┘
-```
-
-### Data Flow
-
-1. **User speaks** → Frontend captures PCM audio at 16 kHz and streams it over WebSocket
-2. **User draws** → Canvas annotations are captured as screenshots and sent as image blobs
-3. **Orchestrator** receives multimodal input via Gemini Live API (BIDI streaming mode)
-4. **Orchestrator decides** whether to call `generate_code` or `generate_image` (only after user approval)
-5. **Code Agent** generates/edits React + TypeScript + Tailwind files using ADK tools
-6. **Image Agent** takes the canvas frame as a composition reference, generates a polished image, and uploads to GCS
-7. **Results stream back** → Frontend applies file changes to the live Sandpack preview in real time
-8. **Orchestrator narrates** the result via voice output
+<div align="center">
+<img src="assets/architecture.png" alt="Architecture Diagram" />
+</div>
 
 ---
 
