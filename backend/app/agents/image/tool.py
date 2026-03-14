@@ -218,6 +218,7 @@ async def generate_image(
         )
 
         if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            yield "[ToolComplete] generate_image: Superseded by a newer request."
             return
 
         response = await generate_task
@@ -286,6 +287,7 @@ async def generate_image(
         )
 
         if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            yield "[ToolComplete] generate_image: Superseded by a newer request."
             return
 
         try:
@@ -357,6 +359,7 @@ async def generate_image(
             "Image generation failed for session %s", orchestrator_session_id
         )
         if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            yield "[ToolComplete] generate_image: Superseded by a newer request."
             return
         await emit_tool_event(
             orchestrator_session_id,

@@ -99,7 +99,7 @@ class _CodeInterceptQueue(LiveRequestQueue):
         super().__init__()
         self._websocket = websocket
         self._ws_lock = ws_lock
-        self._transcript: collections.deque[str] = collections.deque(maxlen=50)
+        self._transcript: collections.deque[str] = collections.deque(maxlen=200)
 
     async def emit_client_event(self, payload: dict[str, object]) -> None:
         try:
@@ -515,10 +515,10 @@ async def websocket_endpoint(
         session_resumption=types.SessionResumptionConfig(),
         proactivity=types.ProactivityConfig(proactive_audio=True),
         enable_affective_dialog=True,
-        context_window_compression=types.ContextWindowCompressionConfig(
-            trigger_tokens=100000,
-            sliding_window=types.SlidingWindow(target_tokens=80000),
-        ),
+        # context_window_compression=types.ContextWindowCompressionConfig(
+        #     trigger_tokens=100000,
+        #     sliding_window=types.SlidingWindow(target_tokens=80000),
+        # ),
     )
 
     # Trigger the agent immediately so it greets the user on connection.

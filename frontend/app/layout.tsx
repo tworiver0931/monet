@@ -17,6 +17,15 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full">
+      <head>
+        <link
+          rel="preload"
+          href="/LastoriaBoldRegular.otf"
+          as="font"
+          type="font/otf"
+          crossOrigin="anonymous"
+        />
+      </head>
       <body className="flex min-h-full flex-col bg-gray-100 text-gray-900 antialiased">
         <HomeScreenTransitionProvider>{children}</HomeScreenTransitionProvider>
       </body>

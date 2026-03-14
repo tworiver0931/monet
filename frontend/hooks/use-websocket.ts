@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 import {
   MonetWebSocket,
   type CodePayload,
@@ -54,6 +54,165 @@ function patchToolJob(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Consolidated state & reducer to batch updates from WebSocket events
+// ---------------------------------------------------------------------------
+
+type WSState = {
+  connectionState: ConnectionState;
+  codeJob: ToolJobState | null;
+  imageJob: ToolJobState | null;
+  codeResult: CodePayload | null;
+  streamText: string;
+  generatedImage: GeneratedImagePayload | null;
+  isTurnComplete: boolean;
+  timeoutReason: "idle" | "hard_limit" | null;
+};
+
+const initialState: WSState = {
+  connectionState: "disconnected",
+  codeJob: null,
+  imageJob: null,
+  codeResult: null,
+  streamText: "",
+  generatedImage: null,
+  isTurnComplete: true,
+  timeoutReason: null,
+};
+
+type WSAction =
+  | { type: "SET_CONNECTION"; state: ConnectionState }
+  | { type: "CLEAR_TIMEOUT" }
+  | { type: "SET_TIMEOUT"; reason: "idle" | "hard_limit" }
+  | { type: "APPEND_TEXT"; text: string }
+  | { type: "TOOL_STARTED"; payload: ToolLifecyclePayload }
+  | { type: "TOOL_PROGRESS"; payload: ToolLifecyclePayload }
+  | { type: "TOOL_RESULT"; payload: ToolLifecyclePayload }
+  | { type: "TOOL_FINISHED"; payload: ToolLifecyclePayload }
+  | { type: "TOOL_CANCELLED"; payload: ToolLifecyclePayload }
+  | { type: "TOOL_FAILED"; payload: ToolLifecyclePayload }
+  | { type: "SET_GENERATED_IMAGE"; image: GeneratedImagePayload }
+  | { type: "CLEAR_GENERATED_IMAGE" }
+  | { type: "SET_CODE_RESULT"; payload: CodePayload }
+  | { type: "TURN_COMPLETE" }
+  | { type: "INTERRUPTED" }
+  | { type: "SEND_TEXT" }
+  | { type: "DISCONNECT" };
+
+function wsReducer(state: WSState, action: WSAction): WSState {
+  switch (action.type) {
+    case "SET_CONNECTION":
+      return {
+        ...state,
+        connectionState: action.state,
+        ...(action.state === "connected" ? { timeoutReason: null } : {}),
+      };
+    case "CLEAR_TIMEOUT":
+      return { ...state, timeoutReason: null };
+    case "SET_TIMEOUT":
+      return { ...state, timeoutReason: action.reason };
+    case "APPEND_TEXT":
+      return {
+        ...state,
+        isTurnComplete: false,
+        streamText: state.streamText + action.text,
+      };
+    case "TOOL_STARTED":
+      if (action.payload.toolName === "generate_code") {
+        return {
+          ...state,
+          isTurnComplete: false,
+          codeJob: buildToolJob(action.payload, "running"),
+        };
+      }
+      return {
+        ...state,
+        isTurnComplete: false,
+        generatedImage: null,
+        imageJob: buildToolJob(action.payload, "running"),
+      };
+    case "TOOL_PROGRESS":
+      if (action.payload.toolName === "generate_code") {
+        return {
+          ...state,
+          codeJob: patchToolJob(state.codeJob, action.payload),
+        };
+      }
+      return {
+        ...state,
+        imageJob: patchToolJob(state.imageJob, action.payload),
+      };
+    case "TOOL_RESULT":
+      if (action.payload.toolName === "generate_code") {
+        return {
+          ...state,
+          codeJob: patchToolJob(state.codeJob, action.payload),
+        };
+      }
+      return {
+        ...state,
+        imageJob: patchToolJob(state.imageJob, action.payload),
+      };
+    case "TOOL_FINISHED":
+      if (action.payload.toolName === "generate_code") {
+        return {
+          ...state,
+          codeJob: patchToolJob(state.codeJob, action.payload, "finished"),
+        };
+      }
+      return {
+        ...state,
+        imageJob: patchToolJob(state.imageJob, action.payload, "finished"),
+      };
+    case "TOOL_CANCELLED":
+      if (action.payload.toolName === "generate_code") {
+        return {
+          ...state,
+          codeJob: patchToolJob(state.codeJob, action.payload, "cancelled"),
+        };
+      }
+      return {
+        ...state,
+        imageJob: patchToolJob(state.imageJob, action.payload, "cancelled"),
+        generatedImage: null,
+      };
+    case "TOOL_FAILED":
+      if (action.payload.toolName === "generate_code") {
+        return {
+          ...state,
+          codeJob: patchToolJob(state.codeJob, action.payload, "failed"),
+        };
+      }
+      return {
+        ...state,
+        imageJob: patchToolJob(state.imageJob, action.payload, "failed"),
+        generatedImage: null,
+      };
+    case "SET_GENERATED_IMAGE":
+      return { ...state, generatedImage: action.image };
+    case "CLEAR_GENERATED_IMAGE":
+      return { ...state, generatedImage: null };
+    case "SET_CODE_RESULT":
+      return {
+        ...state,
+        isTurnComplete: false,
+        codeResult: action.payload,
+      };
+    case "TURN_COMPLETE":
+      return { ...state, isTurnComplete: true };
+    case "INTERRUPTED":
+      return { ...state, isTurnComplete: true, streamText: "" };
+    case "SEND_TEXT":
+      return { ...state, isTurnComplete: false, streamText: "" };
+    case "DISCONNECT":
+      return {
+        ...initialState,
+      };
+    default:
+      return state;
+  }
+}
+
 export type UseWebSocketReturn = {
   connect: () => void;
   disconnect: () => void;
@@ -86,18 +245,7 @@ export function useWebSocket(
   onInterrupted?: () => void,
 ): UseWebSocketReturn {
   const wsRef = useRef<MonetWebSocket | null>(null);
-  const [connectionState, setConnectionState] =
-    useState<ConnectionState>("disconnected");
-  const [codeJob, setCodeJob] = useState<ToolJobState | null>(null);
-  const [imageJob, setImageJob] = useState<ToolJobState | null>(null);
-  const [codeResult, setCodeResult] = useState<CodePayload | null>(null);
-  const [streamText, setStreamText] = useState("");
-  const [generatedImage, setGeneratedImage] =
-    useState<GeneratedImagePayload | null>(null);
-  const [isTurnComplete, setIsTurnComplete] = useState(true);
-  const [timeoutReason, setTimeoutReason] = useState<
-    "idle" | "hard_limit" | null
-  >(null);
+  const [state, dispatch] = useReducer(wsReducer, initialState);
 
   const onAudioReceivedRef = useRef(onAudioReceived);
   onAudioReceivedRef.current = onAudioReceived;
@@ -106,27 +254,9 @@ export function useWebSocket(
   const codeJobRef = useRef<ToolJobState | null>(null);
   const imageJobRef = useRef<ToolJobState | null>(null);
 
-  const updateCodeJob = useCallback(
-    (updater: ToolJobState | null | ((prev: ToolJobState | null) => ToolJobState | null)) => {
-      setCodeJob((prev) => {
-        const next = typeof updater === "function" ? updater(prev) : updater;
-        codeJobRef.current = next;
-        return next;
-      });
-    },
-    [],
-  );
-
-  const updateImageJob = useCallback(
-    (updater: ToolJobState | null | ((prev: ToolJobState | null) => ToolJobState | null)) => {
-      setImageJob((prev) => {
-        const next = typeof updater === "function" ? updater(prev) : updater;
-        imageJobRef.current = next;
-        return next;
-      });
-    },
-    [],
-  );
+  // Keep refs in sync with reducer state for use in non-React callbacks
+  codeJobRef.current = state.codeJob;
+  imageJobRef.current = state.imageJob;
 
   const connect = useCallback(() => {
     if (wsRef.current) {
@@ -134,19 +264,18 @@ export function useWebSocket(
       return;
     }
 
-    setConnectionState("connecting");
+    dispatch({ type: "SET_CONNECTION", state: "connecting" });
 
     const handlers: WSEventHandlers = {
       onOpen: () => {
-        setConnectionState("connected");
-        setTimeoutReason(null);
+        dispatch({ type: "SET_CONNECTION", state: "connected" });
       },
       onClose: () => {
-        setConnectionState("disconnected");
+        dispatch({ type: "SET_CONNECTION", state: "disconnected" });
       },
       onTransportError: (message) => {
         console.error("WebSocket transport error:", message);
-        setConnectionState("disconnected");
+        dispatch({ type: "SET_CONNECTION", state: "disconnected" });
       },
       onBackendError: (message) => {
         console.error("WebSocket backend error:", message);
@@ -155,56 +284,25 @@ export function useWebSocket(
         onAudioReceivedRef.current?.(pcmData);
       },
       onText: (text) => {
-        setIsTurnComplete(false);
-        setStreamText((prev) => prev + text);
+        dispatch({ type: "APPEND_TEXT", text });
       },
       onToolStarted: (payload) => {
-        setIsTurnComplete(false);
-        if (payload.toolName === "generate_code") {
-          updateCodeJob(buildToolJob(payload, "running"));
-          return;
-        }
-        setGeneratedImage(null);
-        updateImageJob(buildToolJob(payload, "running"));
+        dispatch({ type: "TOOL_STARTED", payload });
       },
       onToolProgress: (payload) => {
-        if (payload.toolName === "generate_code") {
-          updateCodeJob((previous) => patchToolJob(previous, payload));
-          return;
-        }
-        updateImageJob((previous) => patchToolJob(previous, payload));
+        dispatch({ type: "TOOL_PROGRESS", payload });
       },
       onToolResult: (payload) => {
-        if (payload.toolName === "generate_code") {
-          updateCodeJob((previous) => patchToolJob(previous, payload));
-          return;
-        }
-        updateImageJob((previous) => patchToolJob(previous, payload));
+        dispatch({ type: "TOOL_RESULT", payload });
       },
       onToolFinished: (payload) => {
-        if (payload.toolName === "generate_code") {
-          updateCodeJob((previous) => patchToolJob(previous, payload, "finished"));
-          return;
-        }
-        updateImageJob((previous) => patchToolJob(previous, payload, "finished"));
+        dispatch({ type: "TOOL_FINISHED", payload });
       },
       onToolCancelled: (payload) => {
-        if (payload.toolName === "generate_code") {
-          updateCodeJob((previous) =>
-            patchToolJob(previous, payload, "cancelled"),
-          );
-          return;
-        }
-        updateImageJob((previous) => patchToolJob(previous, payload, "cancelled"));
-        setGeneratedImage(null);
+        dispatch({ type: "TOOL_CANCELLED", payload });
       },
       onToolFailed: (payload) => {
-        if (payload.toolName === "generate_code") {
-          updateCodeJob((previous) => patchToolJob(previous, payload, "failed"));
-          return;
-        }
-        updateImageJob((previous) => patchToolJob(previous, payload, "failed"));
-        setGeneratedImage(null);
+        dispatch({ type: "TOOL_FAILED", payload });
       },
       onGeneratedImage: (image) => {
         const activeImageJob = imageJobRef.current;
@@ -221,7 +319,7 @@ export function useWebSocket(
         ) {
           return;
         }
-        setGeneratedImage(image);
+        dispatch({ type: "SET_GENERATED_IMAGE", image });
       },
       onCode: (payload) => {
         const activeCodeJob = codeJobRef.current;
@@ -238,18 +336,16 @@ export function useWebSocket(
         ) {
           return;
         }
-        setIsTurnComplete(false);
-        setCodeResult(payload);
+        dispatch({ type: "SET_CODE_RESULT", payload });
       },
       onTurnComplete: () => {
-        setIsTurnComplete(true);
+        dispatch({ type: "TURN_COMPLETE" });
       },
       onSessionTimeout: (reason: "idle" | "hard_limit") => {
-        setTimeoutReason(reason);
+        dispatch({ type: "SET_TIMEOUT", reason });
       },
       onInterrupted: () => {
-        setIsTurnComplete(true);
-        setStreamText("");
+        dispatch({ type: "INTERRUPTED" });
         onInterruptedRef.current?.();
       },
     };
@@ -262,18 +358,11 @@ export function useWebSocket(
   const disconnect = useCallback(() => {
     wsRef.current?.disconnect();
     wsRef.current = null;
-    setConnectionState("disconnected");
-    updateCodeJob(null);
-    updateImageJob(null);
-    setCodeResult(null);
-    setGeneratedImage(null);
-    setStreamText("");
-    setTimeoutReason(null);
-  }, [updateCodeJob, updateImageJob]);
+    dispatch({ type: "DISCONNECT" });
+  }, []);
 
   const sendText = useCallback((text: string) => {
-    setIsTurnComplete(false);
-    setStreamText("");
+    dispatch({ type: "SEND_TEXT" });
     wsRef.current?.sendText(text);
   }, []);
 
@@ -304,11 +393,11 @@ export function useWebSocket(
   }, []);
 
   const clearGeneratedImage = useCallback(() => {
-    setGeneratedImage(null);
+    dispatch({ type: "CLEAR_GENERATED_IMAGE" });
   }, []);
 
-  const isCodeAgentGenerating = codeJob?.status === "running";
-  const isImageGenerating = imageJob?.status === "running";
+  const isCodeAgentGenerating = state.codeJob?.status === "running";
+  const isImageGenerating = state.imageJob?.status === "running";
 
   useEffect(() => {
     return () => {
@@ -325,16 +414,16 @@ export function useWebSocket(
     sendImageGenerationFrame,
     sendImageUpload,
     sendRuntimeError,
-    connectionState,
-    codeJob,
-    imageJob,
-    codeResult,
-    streamText,
+    connectionState: state.connectionState,
+    codeJob: state.codeJob,
+    imageJob: state.imageJob,
+    codeResult: state.codeResult,
+    streamText: state.streamText,
     isCodeAgentGenerating,
     isImageGenerating,
-    generatedImage,
+    generatedImage: state.generatedImage,
     clearGeneratedImage,
-    isTurnComplete,
-    timeoutReason,
+    isTurnComplete: state.isTurnComplete,
+    timeoutReason: state.timeoutReason,
   };
 }

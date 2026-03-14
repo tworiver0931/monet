@@ -15,7 +15,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import AsyncGenerator, Awaitable, Callable, Literal
 
@@ -174,6 +176,33 @@ _user_turn_ids: dict[str, int] = {}
 _tool_call_turn_ids: dict[str, dict[str, int]] = {}
 _tool_job_lock = asyncio.Lock()
 
+# Track last-access time for TTL-based eviction of orphaned entries
+_session_last_access: dict[str, float] = {}
+_SESSION_TTL_SECONDS = 3600  # 1 hour
+
+
+def _touch_session(session_id: str) -> None:
+    """Update the last-access timestamp for a session."""
+    _session_last_access[session_id] = time.monotonic()
+
+
+def _evict_stale_sessions() -> None:
+    """Remove entries from all registries for sessions older than TTL."""
+    now = time.monotonic()
+    stale = [
+        sid for sid, ts in _session_last_access.items()
+        if now - ts > _SESSION_TTL_SECONDS
+    ]
+    for sid in stale:
+        _live_state_registry.pop(sid, None)
+        _active_tool_jobs.pop(sid, None)
+        _user_turn_ids.pop(sid, None)
+        _tool_call_turn_ids.pop(sid, None)
+        _fast_mode_history.pop(f"code-{sid}", None)
+        _session_last_access.pop(sid, None)
+    if stale:
+        logger.info("Evicted %d stale sessions from registries", len(stale))
+
 
 def register_live_state(session_id: str, state: dict) -> None:
     """Register live state for a session (called from main.py)."""
@@ -181,6 +210,9 @@ def register_live_state(session_id: str, state: dict) -> None:
     state.setdefault("latest_user_turn_source", None)
     state.setdefault("latest_user_turn_text", "")
     _live_state_registry[session_id] = state
+    _touch_session(session_id)
+    # Periodically evict stale sessions on registration
+    _evict_stale_sessions()
 
 
 def unregister_live_state(session_id: str) -> None:
@@ -189,13 +221,17 @@ def unregister_live_state(session_id: str) -> None:
     _active_tool_jobs.pop(session_id, None)
     _user_turn_ids.pop(session_id, None)
     _tool_call_turn_ids.pop(session_id, None)
+    _session_last_access.pop(session_id, None)
     # Clean up fast-mode conversation history for this session
     _fast_mode_history.pop(f"code-{session_id}", None)
 
 
 def get_live_state(session_id: str) -> dict:
     """Return the live state dict for a session."""
-    return _live_state_registry.get(session_id, {})
+    state = _live_state_registry.get(session_id, {})
+    if state:
+        _touch_session(session_id)
+    return state
 
 
 async def record_user_turn(
@@ -420,9 +456,10 @@ async def wait_for_task_heartbeats(
 # ---------------------------------------------------------------------------
 
 # Maps code_session_id -> list of Content (user/model turns).
-# Bounded to MAX_FAST_MODE_SESSIONS to prevent unbounded memory growth.
+# Bounded to MAX_FAST_MODE_SESSIONS with LRU eviction to prevent unbounded
+# memory growth while keeping the most recently active sessions.
 MAX_FAST_MODE_SESSIONS = 100
-_fast_mode_history: dict[str, list[types.Content]] = {}
+_fast_mode_history: OrderedDict[str, list[types.Content]] = OrderedDict()
 
 # ---------------------------------------------------------------------------
 # Streaming FunctionTool wrapper (called by the Main Agent)
@@ -498,8 +535,10 @@ async def _fast_generate(
         prompt_text, code_files, latest_frame, latest_mime,
     )
 
-    # Get conversation history
+    # Get conversation history (move to end for LRU tracking)
     history = _fast_mode_history.get(session_id, [])
+    if session_id in _fast_mode_history:
+        _fast_mode_history.move_to_end(session_id)
 
     async with asyncio.timeout(120):
         response = await client.aio.models.generate_content(
@@ -553,11 +592,9 @@ async def _fast_generate(
         history = history[-20:]
     _fast_mode_history[session_id] = history
 
-    # Evict oldest sessions if over capacity
-    if len(_fast_mode_history) > MAX_FAST_MODE_SESSIONS:
-        excess = len(_fast_mode_history) - MAX_FAST_MODE_SESSIONS
-        for key in list(_fast_mode_history)[:excess]:
-            _fast_mode_history.pop(key, None)
+    # Evict least-recently-used sessions if over capacity
+    while len(_fast_mode_history) > MAX_FAST_MODE_SESSIONS:
+        _fast_mode_history.popitem(last=False)
 
     return updated_files, code_response.summary
 
@@ -682,6 +719,7 @@ async def generate_code(
             )
 
             if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+                yield "[ToolComplete] generate_code: Superseded by a newer request."
                 return
 
             updated_files, summary = await generate_task
@@ -695,6 +733,7 @@ async def generate_code(
                 )
 
             if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+                yield "[ToolComplete] generate_code: Superseded by a newer request."
                 return
 
             await emit_tool_event(
@@ -819,6 +858,7 @@ async def generate_code(
             new_message=current_msg,
         ):
             if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+                yield "[ToolComplete] generate_code: Superseded by a newer request."
                 return
 
             if event.actions and event.actions.state_delta:
@@ -848,6 +888,7 @@ async def generate_code(
                 summary = "".join(p.text for p in event.content.parts if p.text)
 
         if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            yield "[ToolComplete] generate_code: Superseded by a newer request."
             return
 
         final_summary = summary or "Code generation complete."
@@ -890,6 +931,7 @@ async def generate_code(
             "Code generation failed for session %s", orchestrator_session_id
         )
         if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            yield "[ToolComplete] generate_code: Superseded by a newer request."
             return
         await emit_tool_event(
             orchestrator_session_id,
