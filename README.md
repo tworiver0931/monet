@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="frontend/public/icon.png" alt="Monet" width="120" />
+
 # Monet
 
 ### Turn your impressions into software.
