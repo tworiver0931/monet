@@ -90,10 +90,7 @@ export function getSandpackConfig(
     // CDN external resource; the import causes PostCSS path resolution errors.
     let content = file.content;
     if (normalizedPath.endsWith(".css")) {
-      content = content.replace(
-        /@import\s+['"]tailwindcss['"]\s*;?/g,
-        "",
-      );
+      content = content.replace(/@import\s+['"]tailwindcss['"]\s*;?/g, "");
     }
     sandpackFiles[normalizedPath] = content;
     if (normalizedPath === "App.tsx") {

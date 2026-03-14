@@ -19,6 +19,7 @@ from ...storage import upload_public_blob
 from ..code.agent import (
     _cancel_background_task,
     begin_tool_job,
+    build_tool_turn_gate_error,
     claim_tool_call_turn,
     clear_tool_job,
     emit_client_event,
@@ -118,6 +119,7 @@ async def generate_image(
             turn_id,
             live.get("latest_user_turn_source"),
         )
+        yield build_tool_turn_gate_error(tool_name, turn_reason)
         return
     job_cleared = False
     generate_task: asyncio.Task | None = None
@@ -189,21 +191,23 @@ async def generate_image(
             ),
         ]
 
-        generate_task = asyncio.create_task(
-            client.aio.models.generate_content(
-                model=IMAGE_GEN_MODEL,
-                contents=[
-                    types.Content(role="user", parts=user_parts),
-                ],
-                config=types.GenerateContentConfig(
-                    system_instruction=_IMAGE_GEN_SYSTEM_INSTRUCTION,
-                    response_modalities=[types.Modality.IMAGE],
-                    image_config=types.ImageConfig(
-                        image_size="1K",
+        async def _generate_with_timeout():
+            async with asyncio.timeout(120):
+                return await client.aio.models.generate_content(
+                    model=IMAGE_GEN_MODEL,
+                    contents=[
+                        types.Content(role="user", parts=user_parts),
+                    ],
+                    config=types.GenerateContentConfig(
+                        system_instruction=_IMAGE_GEN_SYSTEM_INSTRUCTION,
+                        response_modalities=[types.Modality.IMAGE],
+                        image_config=types.ImageConfig(
+                            image_size="1K",
+                        ),
                     ),
-                ),
-            )
-        )
+                )
+
+        generate_task = asyncio.create_task(_generate_with_timeout())
         await wait_for_task_heartbeats(
             task=generate_task,
             session_id=orchestrator_session_id,

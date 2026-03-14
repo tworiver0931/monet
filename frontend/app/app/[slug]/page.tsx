@@ -30,7 +30,9 @@ export default function DeployedAppPage() {
   useEffect(() => {
     async function fetchDeployment() {
       try {
-        const res = await fetch(`${BACKEND_URL}/api/deployments/${params.slug}`);
+        const res = await fetch(
+          `${BACKEND_URL}/api/deployments/${params.slug}`,
+        );
         if (!res.ok) {
           setError(res.status === 404 ? "App not found" : "Failed to load app");
           return;

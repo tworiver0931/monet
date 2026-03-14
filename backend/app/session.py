@@ -11,7 +11,7 @@ import logging
 
 import asyncpg
 
-from .config import DATABASE_URL, CLOUD_SQL_CONNECTION_NAME
+from .config import DATABASE_URL, CLOUD_SQL_CONNECTION_NAME, DB_POOL_MIN_SIZE, DB_POOL_MAX_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +32,11 @@ CREATE TABLE IF NOT EXISTS deployment (
 );
 """
 
-_CREATE_INDEX_SQL = """
-CREATE INDEX IF NOT EXISTS idx_deployment_slug ON deployment (slug);
-"""
+_CREATE_INDEXES_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_deployment_slug ON deployment (slug);",
+    "CREATE INDEX IF NOT EXISTS idx_deployment_session_id ON deployment (session_id);",
+    "CREATE INDEX IF NOT EXISTS idx_deployment_created_at ON deployment (created_at);",
+]
 
 
 def _get_cloud_sql_connector_class():
@@ -69,15 +71,15 @@ async def get_pool() -> asyncpg.Pool:
 
             _pool = await asyncpg.create_pool(
                 connect=_getconn,
-                min_size=1,
-                max_size=5,
+                min_size=DB_POOL_MIN_SIZE,
+                max_size=DB_POOL_MAX_SIZE,
                 command_timeout=30,
             )
         elif DATABASE_URL:
             connect_kwargs: dict = {
                 "dsn": DATABASE_URL,
-                "min_size": 1,
-                "max_size": 5,
+                "min_size": DB_POOL_MIN_SIZE,
+                "max_size": DB_POOL_MAX_SIZE,
                 "command_timeout": 30,
             }
             if "localhost" not in DATABASE_URL and "127.0.0.1" not in DATABASE_URL:
@@ -93,7 +95,8 @@ async def init_db() -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(_CREATE_TABLE_SQL)
-        await conn.execute(_CREATE_INDEX_SQL)
+        for idx_sql in _CREATE_INDEXES_SQL:
+            await conn.execute(idx_sql)
     logger.info("Database tables initialized")
 
 

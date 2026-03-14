@@ -2,13 +2,7 @@
 
 import { extractAllCodeBlocks } from "@/lib/utils";
 import { AudioPlayer } from "@/lib/audio-player";
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import CodeViewer from "@/components/code-viewer";
 import {
@@ -229,7 +223,7 @@ export default function Page() {
   }, [homeTransitionPhase, isBottomBarVisible, shouldRenderBottomBar]);
 
   // When code files arrive from WebSocket
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!activeCodeResult) {
       return;
     }
@@ -239,7 +233,7 @@ export default function Page() {
   // Extract code from streamed text — only parse when at least one
   // complete fenced block exists (opening + closing ```).
   const lastExtractedStreamRef = useRef("");
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!streamText || !streamText.includes("```")) return;
 
     // Count fence markers; need at least 2 for one complete block.

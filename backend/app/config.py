@@ -33,6 +33,13 @@ CODE_FAST_MODE = os.getenv("CODE_FAST_MODE", "true").lower() in ("1", "true", "y
 
 GCS_BUCKET = os.getenv("GCS_BUCKET", "")
 
+# Database connection pool sizing
+DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
+DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
+
+# Maximum upload file size in bytes (default 10 MB)
+MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", str(10 * 1024 * 1024)))
+
 # Session timeout settings (in seconds)
 SESSION_IDLE_TIMEOUT = int(os.getenv("SESSION_IDLE_TIMEOUT", "300"))  # 5 minutes
 SESSION_HARD_LIMIT = int(os.getenv("SESSION_HARD_LIMIT", "1200"))  # 20 minutes

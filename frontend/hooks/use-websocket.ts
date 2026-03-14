@@ -47,7 +47,11 @@ function patchToolJob(
   if (previous && previous.jobId !== payload.jobId) {
     return previous;
   }
-  return buildToolJob(payload, status ?? previous?.status ?? "running", previous);
+  return buildToolJob(
+    payload,
+    status ?? previous?.status ?? "running",
+    previous,
+  );
 }
 
 export type UseWebSocketReturn = {
@@ -102,13 +106,27 @@ export function useWebSocket(
   const codeJobRef = useRef<ToolJobState | null>(null);
   const imageJobRef = useRef<ToolJobState | null>(null);
 
-  useEffect(() => {
-    codeJobRef.current = codeJob;
-  }, [codeJob]);
+  const updateCodeJob = useCallback(
+    (updater: ToolJobState | null | ((prev: ToolJobState | null) => ToolJobState | null)) => {
+      setCodeJob((prev) => {
+        const next = typeof updater === "function" ? updater(prev) : updater;
+        codeJobRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
 
-  useEffect(() => {
-    imageJobRef.current = imageJob;
-  }, [imageJob]);
+  const updateImageJob = useCallback(
+    (updater: ToolJobState | null | ((prev: ToolJobState | null) => ToolJobState | null)) => {
+      setImageJob((prev) => {
+        const next = typeof updater === "function" ? updater(prev) : updater;
+        imageJobRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
 
   const connect = useCallback(() => {
     if (wsRef.current) {
@@ -143,47 +161,49 @@ export function useWebSocket(
       onToolStarted: (payload) => {
         setIsTurnComplete(false);
         if (payload.toolName === "generate_code") {
-          setCodeJob(buildToolJob(payload, "running"));
+          updateCodeJob(buildToolJob(payload, "running"));
           return;
         }
         setGeneratedImage(null);
-        setImageJob(buildToolJob(payload, "running"));
+        updateImageJob(buildToolJob(payload, "running"));
       },
       onToolProgress: (payload) => {
         if (payload.toolName === "generate_code") {
-          setCodeJob((previous) => patchToolJob(previous, payload));
+          updateCodeJob((previous) => patchToolJob(previous, payload));
           return;
         }
-        setImageJob((previous) => patchToolJob(previous, payload));
+        updateImageJob((previous) => patchToolJob(previous, payload));
       },
       onToolResult: (payload) => {
         if (payload.toolName === "generate_code") {
-          setCodeJob((previous) => patchToolJob(previous, payload));
+          updateCodeJob((previous) => patchToolJob(previous, payload));
           return;
         }
-        setImageJob((previous) => patchToolJob(previous, payload));
+        updateImageJob((previous) => patchToolJob(previous, payload));
       },
       onToolFinished: (payload) => {
         if (payload.toolName === "generate_code") {
-          setCodeJob((previous) => patchToolJob(previous, payload, "finished"));
+          updateCodeJob((previous) => patchToolJob(previous, payload, "finished"));
           return;
         }
-        setImageJob((previous) => patchToolJob(previous, payload, "finished"));
+        updateImageJob((previous) => patchToolJob(previous, payload, "finished"));
       },
       onToolCancelled: (payload) => {
         if (payload.toolName === "generate_code") {
-          setCodeJob((previous) => patchToolJob(previous, payload, "cancelled"));
+          updateCodeJob((previous) =>
+            patchToolJob(previous, payload, "cancelled"),
+          );
           return;
         }
-        setImageJob((previous) => patchToolJob(previous, payload, "cancelled"));
+        updateImageJob((previous) => patchToolJob(previous, payload, "cancelled"));
         setGeneratedImage(null);
       },
       onToolFailed: (payload) => {
         if (payload.toolName === "generate_code") {
-          setCodeJob((previous) => patchToolJob(previous, payload, "failed"));
+          updateCodeJob((previous) => patchToolJob(previous, payload, "failed"));
           return;
         }
-        setImageJob((previous) => patchToolJob(previous, payload, "failed"));
+        updateImageJob((previous) => patchToolJob(previous, payload, "failed"));
         setGeneratedImage(null);
       },
       onGeneratedImage: (image) => {
@@ -243,13 +263,13 @@ export function useWebSocket(
     wsRef.current?.disconnect();
     wsRef.current = null;
     setConnectionState("disconnected");
-    setCodeJob(null);
-    setImageJob(null);
+    updateCodeJob(null);
+    updateImageJob(null);
     setCodeResult(null);
     setGeneratedImage(null);
     setStreamText("");
     setTimeoutReason(null);
-  }, []);
+  }, [updateCodeJob, updateImageJob]);
 
   const sendText = useCallback((text: string) => {
     setIsTurnComplete(false);

@@ -239,7 +239,9 @@ export function Signature({
       ))}
 
       <g mask={`url(#${maskId})`}>
-        {paths.map((d, i) => <path key={i} d={d} fill={fillColor} />)}
+        {paths.map((d, i) => (
+          <path key={i} d={d} fill={fillColor} />
+        ))}
       </g>
     </motion.svg>
   );

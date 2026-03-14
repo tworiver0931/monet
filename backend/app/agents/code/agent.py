@@ -217,22 +217,82 @@ async def record_user_turn(
     return turn_id
 
 
-async def claim_tool_call_turn(
+def _claim_tool_call_turn_locked(
     session_id: str,
     tool_name: str,
 ) -> tuple[bool, int, str]:
+    """Claim the current user turn while holding ``_tool_job_lock``."""
+    turn_id = _user_turn_ids.get(session_id, 0)
+    if turn_id <= 0:
+        return False, turn_id, "no_user_turn"
+
+    claimed_turns = _tool_call_turn_ids.setdefault(session_id, {})
+    if claimed_turns.get(tool_name) == turn_id:
+        return False, turn_id, "already_used"
+
+    claimed_turns[tool_name] = turn_id
+    return True, turn_id, "claimed"
+
+
+async def claim_tool_call_turn(
+    session_id: str,
+    tool_name: str,
+    *,
+    wait_for_turn_seconds: float = 1.5,
+    poll_interval_seconds: float = 0.05,
+) -> tuple[bool, int, str]:
     """Allow at most one invocation of a given tool per real user turn."""
     async with _tool_job_lock:
-        turn_id = _user_turn_ids.get(session_id, 0)
-        if turn_id <= 0:
-            return False, turn_id, "no_user_turn"
+        claimed, turn_id, reason = _claim_tool_call_turn_locked(
+            session_id,
+            tool_name,
+        )
 
-        claimed_turns = _tool_call_turn_ids.setdefault(session_id, {})
-        if claimed_turns.get(tool_name) == turn_id:
-            return False, turn_id, "already_used"
+    if claimed or reason != "no_user_turn" or wait_for_turn_seconds <= 0:
+        return claimed, turn_id, reason
 
-        claimed_turns[tool_name] = turn_id
-        return True, turn_id, "claimed"
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait_for_turn_seconds
+    while loop.time() < deadline:
+        await asyncio.sleep(poll_interval_seconds)
+        async with _tool_job_lock:
+            claimed, turn_id, reason = _claim_tool_call_turn_locked(
+                session_id,
+                tool_name,
+            )
+        if claimed or reason != "no_user_turn":
+            return claimed, turn_id, reason
+
+    return False, turn_id, reason
+
+
+def build_tool_turn_gate_error(
+    tool_name: str,
+    reason: str,
+) -> str:
+    """Return a tool result that helps the orchestrator recover gracefully."""
+    if reason == "already_used":
+        return (
+            f"[ToolError] {tool_name}: This tool was already used for the current "
+            "user turn. Do not call it again until the user makes a new request. "
+            "If the work is already running or already finished, briefly tell the "
+            "user that instead."
+        )
+
+    if reason == "no_user_turn":
+        return (
+            f"[ToolError] {tool_name}: There is no completed real user turn "
+            "available yet. Do not call any tools right now. If the session just "
+            "started, say exactly: Hello! What would you like to build today? "
+            "Otherwise keep listening and wait until the user's request or "
+            "approval is fully received before trying again."
+        )
+
+    return (
+        f"[ToolError] {tool_name}: This tool call could not be used for the "
+        "current conversation state. Continue the conversation without calling "
+        "tools until the user makes a new approved request."
+    )
 
 
 async def begin_tool_job(
@@ -441,16 +501,17 @@ async def _fast_generate(
     # Get conversation history
     history = _fast_mode_history.get(session_id, [])
 
-    response = await client.aio.models.generate_content(
-        model=CODE_GEN_FAST_MODEL,
-        contents=history + [user_msg],
-        config=types.GenerateContentConfig(
-            system_instruction=instruction,
-            thinking_config=types.ThinkingConfig(thinking_level="medium"),
-            response_mime_type="application/json",
-            response_json_schema=CodeResponse.model_json_schema(),
-        ),
-    )
+    async with asyncio.timeout(120):
+        response = await client.aio.models.generate_content(
+            model=CODE_GEN_FAST_MODEL,
+            contents=history + [user_msg],
+            config=types.GenerateContentConfig(
+                system_instruction=instruction,
+                thinking_config=types.ThinkingConfig(thinking_level="medium"),
+                response_mime_type="application/json",
+                response_json_schema=CodeResponse.model_json_schema(),
+            ),
+        )
 
     response_text = response.text or "{}"
     logger.info("Fast mode raw response length: %d chars", len(response_text))
@@ -539,6 +600,7 @@ async def generate_code(
             turn_id,
             live.get("latest_user_turn_source"),
         )
+        yield build_tool_turn_gate_error(tool_name, turn_reason)
         return
 
     job_cleared = False

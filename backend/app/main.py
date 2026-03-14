@@ -20,7 +20,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import errors as genai_errors, types
 
-from .config import FRONTEND_ORIGINS, SESSION_IDLE_TIMEOUT, SESSION_HARD_LIMIT
+from .config import FRONTEND_ORIGINS, MAX_UPLOAD_SIZE, SESSION_IDLE_TIMEOUT, SESSION_HARD_LIMIT
 from .schemas import DeployRequest, DeployResponse
 from .session import init_db, close_pool, create_deployment, get_deployment_by_slug
 from .agents import agent
@@ -601,6 +601,11 @@ async def create_session_endpoint():
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
     data = await file.read()
+    if len(data) > MAX_UPLOAD_SIZE:
+        return JSONResponse(
+            status_code=413,
+            content={"error": f"File too large (max {MAX_UPLOAD_SIZE // (1024 * 1024)} MB)"},
+        )
     try:
         url = await upload_public_blob(
             data=data,
@@ -645,7 +650,7 @@ async def deploy_app(req: DeployRequest):
     thumbnail_url: str | None = None
     if req.thumbnail:
         try:
-            image_data = base64.b64decode(req.thumbnail)
+            image_data = await asyncio.to_thread(base64.b64decode, req.thumbnail)
             thumbnail_url = await upload_public_blob(
                 data=image_data,
                 filename=f"{slug}.jpg",
@@ -684,15 +689,26 @@ async def get_deployment(slug: str):
     if isinstance(files, str):
         files = json.loads(files)
 
-    return {
-        "id": deployment["id"],
-        "slug": deployment["slug"],
-        "title": deployment["title"],
-        "description": deployment["description"],
-        "files": files,
-        "thumbnailUrl": deployment["thumbnail_url"],
-        "createdAt": deployment["created_at"].isoformat() if deployment["created_at"] else None,
-    }
+    created_at = deployment["created_at"]
+    updated_at = deployment["updated_at"]
+
+    headers = {}
+    if updated_at:
+        headers["Last-Modified"] = updated_at.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        headers["Cache-Control"] = "public, max-age=60"
+
+    return JSONResponse(
+        content={
+            "id": deployment["id"],
+            "slug": deployment["slug"],
+            "title": deployment["title"],
+            "description": deployment["description"],
+            "files": files,
+            "thumbnailUrl": deployment["thumbnail_url"],
+            "createdAt": created_at.isoformat() if created_at else None,
+        },
+        headers=headers,
+    )
 
 
 if __name__ == "__main__":

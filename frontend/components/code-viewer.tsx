@@ -64,7 +64,9 @@ const TOOLS: {
 
 const CodeRunner = dynamic(() => import("@/components/code-runner"), {
   ssr: false,
-  loading: () => <div className="flex h-full w-full items-center justify-center bg-white" />,
+  loading: () => (
+    <div className="flex h-full w-full items-center justify-center bg-white" />
+  ),
 });
 
 const TldrawOverlay = dynamic(() => import("@/components/tldraw-overlay"), {

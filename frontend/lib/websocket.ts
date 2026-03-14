@@ -179,7 +179,9 @@ export class MonetWebSocket {
         this.shouldReconnect &&
         this.reconnectAttempts < this.maxReconnectAttempts
       ) {
-        const delay = Math.min(500 * 2 ** this.reconnectAttempts, 4000) + Math.random() * 1000;
+        const delay =
+          Math.min(500 * 2 ** this.reconnectAttempts, 4000) +
+          Math.random() * 1000;
         this.reconnectAttempts += 1;
         this.reconnectTimer = setTimeout(() => {
           this.connect();
@@ -211,71 +213,62 @@ export class MonetWebSocket {
   }
 
   private handleMessage(msg: Record<string, unknown>): void {
-    const toolPayload = parseToolLifecyclePayload(msg);
+    switch (msg.type) {
+      case "tool_started":
+      case "tool_progress":
+      case "tool_result":
+      case "tool_finished":
+      case "tool_cancelled":
+      case "tool_failed": {
+        const toolPayload = parseToolLifecyclePayload(msg);
+        if (!toolPayload) return;
+        const handlerMap: Record<string, keyof WSEventHandlers> = {
+          tool_started: "onToolStarted",
+          tool_progress: "onToolProgress",
+          tool_result: "onToolResult",
+          tool_finished: "onToolFinished",
+          tool_cancelled: "onToolCancelled",
+          tool_failed: "onToolFailed",
+        };
+        const handler = this.handlers[handlerMap[msg.type as string]];
+        (handler as ((p: ToolLifecyclePayload) => void) | undefined)?.(
+          toolPayload,
+        );
+        return;
+      }
 
-    if (msg.type === "tool_started" && toolPayload) {
-      this.handlers.onToolStarted?.(toolPayload);
-      return;
-    }
+      case "generated_image":
+        this.handlers.onGeneratedImage?.({
+          jobId: typeof msg.jobId === "string" ? msg.jobId : "",
+          url: typeof msg.url === "string" ? msg.url : "",
+          name:
+            typeof msg.name === "string" && msg.name.length > 0
+              ? msg.name
+              : "generated-image.png",
+          mimeType:
+            typeof msg.mimeType === "string" ? msg.mimeType : undefined,
+          data: typeof msg.data === "string" ? msg.data : undefined,
+        });
+        return;
 
-    if (msg.type === "tool_progress" && toolPayload) {
-      this.handlers.onToolProgress?.(toolPayload);
-      return;
-    }
+      case "session_timeout":
+        this.handlers.onSessionTimeout?.(msg.reason as "idle" | "hard_limit");
+        return;
 
-    if (msg.type === "tool_result" && toolPayload) {
-      this.handlers.onToolResult?.(toolPayload);
-      return;
-    }
+      case "code":
+        this.handlers.onCode?.({
+          jobId: typeof msg.jobId === "string" ? msg.jobId : "",
+          files: sanitizeCodeFiles(msg.files),
+        });
+        return;
 
-    if (msg.type === "tool_finished" && toolPayload) {
-      this.handlers.onToolFinished?.(toolPayload);
-      return;
-    }
-
-    if (msg.type === "tool_cancelled" && toolPayload) {
-      this.handlers.onToolCancelled?.(toolPayload);
-      return;
-    }
-
-    if (msg.type === "tool_failed" && toolPayload) {
-      this.handlers.onToolFailed?.(toolPayload);
-      return;
-    }
-
-    if (msg.type === "generated_image") {
-      this.handlers.onGeneratedImage?.({
-        jobId: typeof msg.jobId === "string" ? msg.jobId : "",
-        url: typeof msg.url === "string" ? msg.url : "",
-        name:
-          typeof msg.name === "string" && msg.name.length > 0
-            ? msg.name
-            : "generated-image.png",
-        mimeType: typeof msg.mimeType === "string" ? msg.mimeType : undefined,
-        data: typeof msg.data === "string" ? msg.data : undefined,
-      });
-      return;
-    }
-
-    if (msg.type === "session_timeout") {
-      this.handlers.onSessionTimeout?.(msg.reason as "idle" | "hard_limit");
-      return;
-    }
-
-    if (msg.type === "code") {
-      this.handlers.onCode?.({
-        jobId: typeof msg.jobId === "string" ? msg.jobId : "",
-        files: sanitizeCodeFiles(msg.files),
-      });
-      return;
-    }
-
-    // Error event from backend
-    if (msg.type === "error") {
-      this.handlers.onBackendError?.(
-        (msg.message as string) || (msg.errorCode as string) || "Unknown error",
-      );
-      return;
+      case "error":
+        this.handlers.onBackendError?.(
+          (msg.message as string) ||
+            (msg.errorCode as string) ||
+            "Unknown error",
+        );
+        return;
     }
 
     // ADK Event fields are at the top level (not nested under serverContent)
