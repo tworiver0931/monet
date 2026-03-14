@@ -44,6 +44,8 @@ const GRAINIENT_EXIT_SETTLE_MS = 760;
 
 type AnnotationMode = "interact" | TldrawTool;
 type GrainientPhase = "hidden" | "entering" | "active" | "exiting";
+type PreviewJobStatus = "running" | "finished" | "cancelled" | "failed";
+type RunnerFile = { path: string; content: string };
 
 function clearTimer(timerRef: { current: number | null }) {
   if (timerRef.current !== null) {
@@ -80,7 +82,6 @@ export default function CodeViewer({
   sendImageGenerationFrame,
   sendText,
   sendImageUpload,
-  onRuntimeError,
   pauseFrameStreaming = false,
   renderBottomBar = true,
   bottomBarVisible = true,
@@ -90,6 +91,8 @@ export default function CodeViewer({
   onGeneratedImageApplied,
   previewRenderVersion = 0,
   onPreviewRendered,
+  onPreviewFailed,
+  codeJobStatus,
   voiceControls,
   sessionId,
 }: {
@@ -104,7 +107,6 @@ export default function CodeViewer({
   ) => void;
   sendText?: (text: string) => void;
   sendImageUpload?: (url: string, name: string) => void;
-  onRuntimeError?: (error: string) => void;
   pauseFrameStreaming?: boolean;
   renderBottomBar?: boolean;
   bottomBarVisible?: boolean;
@@ -114,6 +116,8 @@ export default function CodeViewer({
   onGeneratedImageApplied?: () => void;
   previewRenderVersion?: number;
   onPreviewRendered?: (renderVersion: number) => void;
+  onPreviewFailed?: (renderVersion: number) => void;
+  codeJobStatus?: PreviewJobStatus | null;
   voiceControls?: React.ReactNode;
   sessionId?: string;
 }) {
@@ -195,7 +199,7 @@ export default function CodeViewer({
     safeFiles.find((f) => f.path.endsWith("App.tsx")) ||
     safeFiles.find((f) => f.path.endsWith(".tsx")) ||
     safeFiles[0];
-  const runnerFiles = useMemo(
+  const runnerFiles = useMemo<RunnerFile[]>(
     () =>
       safeFiles.map((file) => ({
         path: file.path,
@@ -203,6 +207,22 @@ export default function CodeViewer({
       })),
     [safeFiles],
   );
+  const committedPreviewVersionRef = useRef(0);
+  const latestRequestedPreviewVersionRef = useRef(0);
+  const candidateFilesByVersionRef = useRef<Map<number, RunnerFile[]>>(
+    new Map(),
+  );
+  const lastReportedFailedVersionRef = useRef(0);
+  const [committedRunnerFiles, setCommittedRunnerFiles] = useState<
+    RunnerFile[]
+  >([]);
+  const [committedPreviewVersion, setCommittedPreviewVersion] = useState(0);
+  const [lastFailedPreviewVersion, setLastFailedPreviewVersion] = useState<
+    number | null
+  >(null);
+  const hasCommittedPreview = committedRunnerFiles.length > 0;
+  const hasPendingPreviewCandidate =
+    runnerFiles.length > 0 && previewRenderVersion > committedPreviewVersion;
 
   const previewTargetRef = useRef<HTMLDivElement | null>(null);
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -222,6 +242,107 @@ export default function CodeViewer({
     },
     [onPreviewRendered],
   );
+
+  useEffect(() => {
+    latestRequestedPreviewVersionRef.current = previewRenderVersion;
+
+    if (previewRenderVersion <= 0 || runnerFiles.length === 0) {
+      return;
+    }
+
+    const nextEntries = new Map(candidateFilesByVersionRef.current);
+    nextEntries.set(previewRenderVersion, runnerFiles);
+
+    for (const version of nextEntries.keys()) {
+      if (
+        version < committedPreviewVersionRef.current &&
+        version !== committedPreviewVersionRef.current
+      ) {
+        nextEntries.delete(version);
+      }
+    }
+
+    while (nextEntries.size > 8) {
+      const oldestVersion = Math.min(...nextEntries.keys());
+      if (oldestVersion === committedPreviewVersionRef.current) {
+        break;
+      }
+      nextEntries.delete(oldestVersion);
+    }
+
+    candidateFilesByVersionRef.current = nextEntries;
+  }, [previewRenderVersion, runnerFiles]);
+
+  const handleStagedPreviewRendered = useCallback((renderVersion: number) => {
+    if (
+      renderVersion <= committedPreviewVersionRef.current ||
+      renderVersion > latestRequestedPreviewVersionRef.current
+    ) {
+      return;
+    }
+
+    const nextFiles = candidateFilesByVersionRef.current.get(renderVersion);
+    if (!nextFiles) {
+      return;
+    }
+
+    committedPreviewVersionRef.current = renderVersion;
+    setCommittedRunnerFiles(nextFiles);
+    setCommittedPreviewVersion(renderVersion);
+    setLastFailedPreviewVersion((current) =>
+      current !== null && current <= renderVersion ? null : current,
+    );
+  }, []);
+
+  const handleStagedPreviewError = useCallback(
+    (renderVersion: number) => {
+      if (renderVersion > latestRequestedPreviewVersionRef.current) {
+        return;
+      }
+
+      setLastFailedPreviewVersion((current) =>
+        current === null || renderVersion > current ? renderVersion : current,
+      );
+
+      if (renderVersion > lastReportedFailedVersionRef.current) {
+        lastReportedFailedVersionRef.current = renderVersion;
+        onPreviewFailed?.(renderVersion);
+      }
+    },
+    [onPreviewFailed],
+  );
+
+  const previewStatusText = useMemo(() => {
+    if (!hasPendingPreviewCandidate) {
+      return null;
+    }
+
+    if (!hasCommittedPreview) {
+      if (lastFailedPreviewVersion === previewRenderVersion) {
+        return "Preview will appear when the latest draft is ready.";
+      }
+
+      return codeJobStatus === "running"
+        ? "Preparing preview..."
+        : "Finalizing preview...";
+    }
+
+    if (codeJobStatus === "running") {
+      return "Updating preview...";
+    }
+
+    if (lastFailedPreviewVersion === previewRenderVersion) {
+      return "Showing last working preview.";
+    }
+
+    return "Finalizing preview...";
+  }, [
+    codeJobStatus,
+    hasCommittedPreview,
+    hasPendingPreviewCandidate,
+    lastFailedPreviewVersion,
+    previewRenderVersion,
+  ]);
 
   const handleCursorClick = useCallback(() => {
     if (isImageGenerating) {
@@ -297,22 +418,24 @@ export default function CodeViewer({
       return;
     }
 
-    let rafId = 0;
-    const updateRect = () => {
-      const editor = editorRef.current;
-      if (!editor) {
-        rafId = window.requestAnimationFrame(updateRect);
-        return;
-      }
+    const editor = editorRef.current;
+    if (!editor) {
+      return;
+    }
 
-      setFrameViewportRect(getFrameViewportRect(editor, generationFrameId));
-      rafId = window.requestAnimationFrame(updateRect);
-    };
+    // Compute initial rect
+    setFrameViewportRect(getFrameViewportRect(editor, generationFrameId));
 
-    updateRect();
+    // Re-compute only when the store changes (shape moved, viewport panned, etc.)
+    const unsub = editor.store.listen(
+      () => {
+        setFrameViewportRect(getFrameViewportRect(editor, generationFrameId));
+      },
+      { scope: "document", source: "all" },
+    );
 
     return () => {
-      window.cancelAnimationFrame(rafId);
+      unsub();
     };
   }, [generationFrameId, isImageGenerating]);
 
@@ -597,33 +720,39 @@ export default function CodeViewer({
   );
 
   // Compositing: merge iframe frame + tldraw annotations
+  const isCompositingRef = useRef(false);
   const compositeAndSend = useCallback(
     async (iframeBase64: string) => {
-      const canvas = compositingCanvasRef.current;
-      if (!canvas) return;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
+      // Drop frames if a previous composite is still in progress
+      if (isCompositingRef.current) return;
+      isCompositingRef.current = true;
 
-      const previewImage = new Image();
-      previewImage.src = `data:image/jpeg;base64,${iframeBase64}`;
       try {
-        await previewImage.decode();
-      } catch {
-        return;
-      }
+        const canvas = compositingCanvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
 
-      canvas.width = previewImage.width;
-      canvas.height = previewImage.height;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(previewImage, 0, 0);
+        const previewImage = new Image();
+        previewImage.src = `data:image/jpeg;base64,${iframeBase64}`;
+        try {
+          await previewImage.decode();
+        } catch {
+          return;
+        }
 
-      const editor = editorRef.current;
-      const container = tldrawContainerRef.current;
-      if (editor && container) {
-        const hasShapes = editor.getCurrentPageShapeIds().size > 0;
-        const hasScribbles = container.querySelector("svg.tl-overlays__item");
+        canvas.width = previewImage.width;
+        canvas.height = previewImage.height;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(previewImage, 0, 0);
 
-        if (hasShapes || hasScribbles) {
+        const editor = editorRef.current;
+        const container = tldrawContainerRef.current;
+        const hasShapes = editor && editor.getCurrentPageShapeIds().size > 0;
+        const hasScribbles =
+          container && container.querySelector("svg.tl-overlays__item");
+
+        if (editor && container && (hasShapes || hasScribbles)) {
           try {
             const overlayDataUrl = await domToPng(container, {
               scale: 1,
@@ -647,21 +776,35 @@ export default function CodeViewer({
             // DOM capture failed, continue without annotations
           }
         }
-      }
 
-      captureGenerationFrame(canvas);
+        captureGenerationFrame(canvas);
 
-      const labeledCanvas = cloneCanvas(canvas);
-      annotateUploadedImageLabels(labeledCanvas);
-      const finalCanvas = resizeCanvasToMaxDimension(
-        labeledCanvas,
-        MAX_PREVIEW_CAPTURE_DIM,
-      );
-      const composited = finalCanvas
-        .toDataURL("image/jpeg", 0.85)
-        .split(",")[1];
-      if (composited) {
-        sendImage?.(composited, "image/jpeg");
+        // Only clone + label if there are uploaded images to annotate
+        const hasUploadedImages =
+          editor &&
+          editor.getCurrentPageShapes().some((shape) => shape.type === "image");
+        let finalCanvas: HTMLCanvasElement;
+        if (hasUploadedImages) {
+          const labeledCanvas = cloneCanvas(canvas);
+          annotateUploadedImageLabels(labeledCanvas);
+          finalCanvas = resizeCanvasToMaxDimension(
+            labeledCanvas,
+            MAX_PREVIEW_CAPTURE_DIM,
+          );
+        } else {
+          finalCanvas = resizeCanvasToMaxDimension(
+            canvas,
+            MAX_PREVIEW_CAPTURE_DIM,
+          );
+        }
+        const composited = finalCanvas
+          .toDataURL("image/jpeg", 0.85)
+          .split(",")[1];
+        if (composited) {
+          sendImage?.(composited, "image/jpeg");
+        }
+      } finally {
+        isCompositingRef.current = false;
       }
     },
     [annotateUploadedImageLabels, captureGenerationFrame, sendImage],
@@ -878,17 +1021,48 @@ export default function CodeViewer({
       <div className="h-full w-full">
         <div
           ref={previewTargetRef}
-          className="relative isolate h-full w-full overflow-auto"
+          className="relative isolate h-full w-full overflow-auto bg-white"
+        >
+          <CodeRunner
+            language={mainFile?.language || "tsx"}
+            files={committedRunnerFiles}
+            previewRenderVersion={committedPreviewVersion}
+            captureMode="settled"
+            showBuiltInErrorScreen={false}
+            reportRuntimeErrors={false}
+          />
+
+          {!hasCommittedPreview && previewStatusText ? (
+            <div className="absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-slate-500">
+              {previewStatusText}
+            </div>
+          ) : null}
+
+          {previewStatusText && hasCommittedPreview ? (
+            <div className="pointer-events-none absolute left-4 top-4 z-20 rounded-full bg-white/85 px-3 py-1 text-xs font-medium text-slate-600 shadow-sm backdrop-blur">
+              {previewStatusText}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {hasPendingPreviewCandidate ? (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -left-[200vw] top-0 h-px w-px overflow-hidden opacity-0"
         >
           <CodeRunner
             language={mainFile?.language || "tsx"}
             files={runnerFiles}
-            onRuntimeError={onRuntimeError}
             previewRenderVersion={previewRenderVersion}
-            onPreviewRendered={onPreviewRendered}
+            onPreviewRendered={handleStagedPreviewRendered}
+            onPreviewError={handleStagedPreviewError}
+            captureMode="off"
+            showBuiltInErrorScreen={false}
+            reportRuntimeErrors={false}
           />
         </div>
-      </div>
+      ) : null}
 
       <AmbientEdgeGlow isActive={showGenerationGlow && !isImageGenerating} />
 

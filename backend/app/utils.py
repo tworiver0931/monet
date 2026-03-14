@@ -16,8 +16,11 @@ _EXT_TO_LANG: dict[str, str] = {
 
 def lang_from_path(path: str) -> str:
     """Infer language from file extension, defaulting to tsx."""
-    for ext, lang in _EXT_TO_LANG.items():
-        if path.endswith(ext):
+    dot = path.rfind(".")
+    if dot != -1:
+        ext = path[dot:]
+        lang = _EXT_TO_LANG.get(ext)
+        if lang is not None:
             return lang
     return "tsx"
 

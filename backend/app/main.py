@@ -20,7 +20,12 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import errors as genai_errors, types
 
-from .config import FRONTEND_ORIGINS, MAX_UPLOAD_SIZE, SESSION_IDLE_TIMEOUT, SESSION_HARD_LIMIT
+from .config import (
+    FRONTEND_ORIGINS,
+    MAX_UPLOAD_SIZE,
+    SESSION_HARD_LIMIT,
+    SESSION_IDLE_TIMEOUT,
+)
 from .schemas import DeployRequest, DeployResponse
 from .session import init_db, close_pool, create_deployment, get_deployment_by_slug
 from .agents import agent
@@ -356,30 +361,44 @@ async def downstream_task(
 
                         # --- Send audio as binary frames ---
                         has_audio = False
+                        audio_parts: list = []
                         if event.content and event.content.parts:
-                            has_audio = any(
-                                p.inline_data
-                                for p in event.content.parts
-                            )
+                            for p in event.content.parts:
+                                if p.inline_data:
+                                    has_audio = True
+                                    audio_parts.append(p)
 
                         if has_audio:
-                            metadata = event.model_dump_json(
-                                exclude={
-                                    "content": {
-                                        "parts": {
-                                            "__all__": {"inline_data"}
-                                        }
-                                    }
-                                },
-                                exclude_none=True,
-                                by_alias=True,
-                            )
+                            # Build lightweight metadata dict manually to
+                            # avoid the expensive model_dump_json on the
+                            # high-frequency audio path.
+                            meta: dict = {}
+                            if getattr(event, "turn_complete", None):
+                                meta["turnComplete"] = True
+                            if getattr(event, "interrupted", None):
+                                meta["interrupted"] = True
+                            if getattr(event, "partial", None) is not None:
+                                meta["partial"] = event.partial
+                            it = getattr(event, "input_transcription", None)
+                            if it and getattr(it, "text", None):
+                                meta["inputTranscription"] = {"text": it.text}
+                            ot = getattr(event, "output_transcription", None)
+                            if ot and getattr(ot, "text", None):
+                                meta["outputTranscription"] = {"text": ot.text}
+                            # Include non-audio text parts
+                            text_parts = []
+                            if event.content and event.content.parts:
+                                for p in event.content.parts:
+                                    if p.text:
+                                        text_parts.append({"text": p.text})
+                            if text_parts:
+                                meta["content"] = {"parts": text_parts}
+                            metadata = json.dumps(meta)
                             async with ws_lock:
-                                for part in event.content.parts:
-                                    if part.inline_data:
-                                        await websocket.send_bytes(
-                                            part.inline_data.data
-                                        )
+                                for part in audio_parts:
+                                    await websocket.send_bytes(
+                                        part.inline_data.data
+                                    )
                                 await websocket.send_text(metadata)
                         else:
                             event_json = event.model_dump_json(
@@ -660,7 +679,7 @@ async def deploy_app(req: DeployRequest):
     thumbnail_url: str | None = None
     if req.thumbnail:
         try:
-            image_data = await asyncio.to_thread(base64.b64decode, req.thumbnail)
+            image_data = base64.b64decode(req.thumbnail)
             thumbnail_url = await upload_public_blob(
                 data=image_data,
                 filename=f"{slug}.jpg",

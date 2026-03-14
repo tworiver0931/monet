@@ -1,6 +1,6 @@
 import type { Editor, TLShapeId } from "tldraw";
 
-const FRAME_CAPTURE_INSET_PX = 4;
+const FRAME_CAPTURE_INSET_PX = 0;
 
 export const MAX_PREVIEW_CAPTURE_DIM = 768;
 export const MAX_GENERATION_FRAME_DIM = 1024;

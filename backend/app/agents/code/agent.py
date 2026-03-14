@@ -17,6 +17,7 @@ import json
 import logging
 import time
 import uuid
+import itertools
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import AsyncGenerator, Awaitable, Callable, Literal
@@ -181,6 +182,16 @@ _active_tool_jobs: dict[str, dict[str, ToolJob]] = {}
 _user_turn_ids: dict[str, int] = {}
 _tool_call_turn_ids: dict[str, dict[str, int]] = {}
 _tool_job_lock = asyncio.Lock()
+_session_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_session_lock(session_id: str) -> asyncio.Lock:
+    """Return a per-session lock, creating one if needed."""
+    lock = _session_locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _session_locks[session_id] = lock
+    return lock
 
 # Track last-access time for TTL-based eviction of orphaned entries
 _session_last_access: dict[str, float] = {}
@@ -204,6 +215,7 @@ def _evict_stale_sessions() -> None:
         _active_tool_jobs.pop(sid, None)
         _user_turn_ids.pop(sid, None)
         _tool_call_turn_ids.pop(sid, None)
+        _session_locks.pop(sid, None)
         _fast_mode_history.pop(f"code-{sid}", None)
         _session_last_access.pop(sid, None)
     if stale:
@@ -236,8 +248,6 @@ def register_live_state(session_id: str, state: dict) -> None:
     state.setdefault("latest_user_turn_text", "")
     _live_state_registry[session_id] = state
     _touch_session(session_id)
-    # Periodically evict stale sessions on registration
-    _evict_stale_sessions()
     start_periodic_eviction()
 
 
@@ -248,6 +258,7 @@ def unregister_live_state(session_id: str) -> None:
     _user_turn_ids.pop(session_id, None)
     _tool_call_turn_ids.pop(session_id, None)
     _session_last_access.pop(session_id, None)
+    _session_locks.pop(session_id, None)
     # Clean up fast-mode conversation history for this session
     _fast_mode_history.pop(f"code-{session_id}", None)
 
@@ -267,7 +278,7 @@ async def record_user_turn(
     text: str | None = None,
 ) -> int:
     """Advance the real-user turn counter for a live session."""
-    async with _tool_job_lock:
+    async with _get_session_lock(session_id):
         turn_id = _user_turn_ids.get(session_id, 0) + 1
         _user_turn_ids[session_id] = turn_id
 
@@ -304,7 +315,8 @@ async def claim_tool_call_turn(
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
 ) -> tuple[bool, int, str]:
     """Allow at most one invocation of a given tool per real user turn."""
-    async with _tool_job_lock:
+    session_lock = _get_session_lock(session_id)
+    async with session_lock:
         claimed, turn_id, reason = _claim_tool_call_turn_locked(
             session_id,
             tool_name,
@@ -317,7 +329,7 @@ async def claim_tool_call_turn(
     deadline = loop.time() + wait_for_turn_seconds
     while loop.time() < deadline:
         await asyncio.sleep(poll_interval_seconds)
-        async with _tool_job_lock:
+        async with session_lock:
             claimed, turn_id, reason = _claim_tool_call_turn_locked(
                 session_id,
                 tool_name,
@@ -363,26 +375,30 @@ async def begin_tool_job(
     job_id: str,
 ) -> ToolJob | None:
     """Mark a tool job as the current active job for this tool."""
-    async with _tool_job_lock:
+    async with _get_session_lock(session_id):
         session_jobs = _active_tool_jobs.setdefault(session_id, {})
         previous = session_jobs.get(tool_name)
         session_jobs[tool_name] = ToolJob(job_id=job_id, tool_name=tool_name)
         return previous
 
 
-async def is_current_tool_job(session_id: str, tool_name: str, job_id: str) -> bool:
-    """Check whether a job is still the current active job for this tool."""
-    async with _tool_job_lock:
-        session_jobs = _active_tool_jobs.get(session_id)
-        if session_jobs is None:
-            return False
-        job = session_jobs.get(tool_name)
-        return job is not None and job.job_id == job_id
+def is_current_tool_job(session_id: str, tool_name: str, job_id: str) -> bool:
+    """Check whether a job is still the current active job for this tool.
+
+    Lock-free: reads of dict values are atomic in CPython's asyncio
+    single-threaded event loop.  The job_id string comparison is safe
+    because ToolJob instances are replaced atomically (never mutated).
+    """
+    session_jobs = _active_tool_jobs.get(session_id)
+    if session_jobs is None:
+        return False
+    job = session_jobs.get(tool_name)
+    return job is not None and job.job_id == job_id
 
 
 async def clear_tool_job(session_id: str, tool_name: str, job_id: str) -> None:
     """Clear the active tool job if it still matches for this tool."""
-    async with _tool_job_lock:
+    async with _get_session_lock(session_id):
         session_jobs = _active_tool_jobs.get(session_id)
         if session_jobs is None:
             return
@@ -459,13 +475,13 @@ async def wait_for_task_heartbeats(
 ) -> None:
     """Emit periodic heartbeat updates while a background task is pending."""
     while not task.done():
-        if not await is_current_tool_job(session_id, tool_name, job_id):
+        if not is_current_tool_job(session_id, tool_name, job_id):
             await _cancel_background_task(task)
             return
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=interval_seconds)
         except asyncio.TimeoutError:
-            if not await is_current_tool_job(session_id, tool_name, job_id):
+            if not is_current_tool_job(session_id, tool_name, job_id):
                 await _cancel_background_task(task)
                 return
             await emit_tool_event(
@@ -622,12 +638,18 @@ async def _fast_generate(
 
     updated_files = apply_file_actions(code_files, action_dicts)
 
-    # Update conversation history (store as plain text for model context)
-    model_msg = types.Content(
-        role="model",
-        parts=[types.Part(text=response_text)],
+    # Update conversation history — store only the request text and model
+    # summary (not full file contents or structured JSON) to keep memory
+    # bounded.  Current files are always injected fresh at call time.
+    history_user_msg = types.Content(
+        role="user",
+        parts=[types.Part(text=prompt_text)],
     )
-    history = history + [user_msg, model_msg]
+    history_model_msg = types.Content(
+        role="model",
+        parts=[types.Part(text=code_response.summary)],
+    )
+    history = history + [history_user_msg, history_model_msg]
     # Keep history bounded (last 10 turns = 20 messages)
     if len(history) > MAX_HISTORY_MESSAGES:
         history = history[-MAX_HISTORY_MESSAGES:]
@@ -722,7 +744,7 @@ async def generate_code(
 
             # Track transcript offset in live state
             offset = live.get("_fast_transcript_offset", 0)
-            new_entries = list(transcript)[offset:]
+            new_entries = list(itertools.islice(transcript, offset, None))
             live["_fast_transcript_offset"] = len(transcript)
 
             if new_entries:
@@ -759,13 +781,13 @@ async def generate_code(
                 client_message="Still generating the code update.",
             )
 
-            if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
                 yield "[ToolComplete] generate_code: Superseded by a newer request."
                 return
 
             updated_files, summary = await generate_task
 
-            if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
                 yield "[ToolComplete] generate_code: Superseded by a newer request."
                 return
 
@@ -838,7 +860,7 @@ async def generate_code(
 
         # Build the user message with new conversation context prepended.
         offset = session.state.get("_transcript_offset", 0)
-        new_entries = list(transcript)[offset:]
+        new_entries = list(itertools.islice(transcript, offset, None))
         session.state["_transcript_offset"] = len(transcript)
         logger.info(
             "Transcript debug: session=%s, total=%d, offset=%d, new_entries=%d",
@@ -890,7 +912,7 @@ async def generate_code(
             session_id=code_session_id,
             new_message=current_msg,
         ):
-            if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
                 yield "[ToolComplete] generate_code: Superseded by a newer request."
                 return
 
@@ -920,7 +942,7 @@ async def generate_code(
             if event.is_final_response() and event.content and event.content.parts:
                 summary = "".join(p.text for p in event.content.parts if p.text)
 
-        if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             yield "[ToolComplete] generate_code: Superseded by a newer request."
             return
 
@@ -943,7 +965,7 @@ async def generate_code(
                 await asyncio.shield(_cancel_background_task(generate_task))
             except Exception:
                 logger.debug("Failed to cancel fast code task", exc_info=True)
-        if await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             try:
                 await asyncio.shield(
                     emit_tool_event(
@@ -963,7 +985,7 @@ async def generate_code(
         logger.exception(
             "Code generation failed for session %s", orchestrator_session_id
         )
-        if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             yield "[ToolComplete] generate_code: Superseded by a newer request."
             return
         await emit_tool_event(

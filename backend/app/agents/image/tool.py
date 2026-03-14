@@ -229,7 +229,7 @@ async def generate_image(
             client_message="Still generating the image.",
         )
 
-        if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             yield "[ToolComplete] generate_image: Superseded by a newer request."
             return
 
@@ -298,7 +298,7 @@ async def generate_image(
             client_message="Saving the generated image.",
         )
 
-        if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             yield "[ToolComplete] generate_image: Superseded by a newer request."
             return
 
@@ -350,7 +350,7 @@ async def generate_image(
                 await asyncio.shield(_cancel_background_task(generate_task))
             except Exception:
                 logger.debug("Failed to cancel image generation task", exc_info=True)
-        if await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             try:
                 await asyncio.shield(
                     emit_tool_event(
@@ -370,7 +370,7 @@ async def generate_image(
         logger.exception(
             "Image generation failed for session %s", orchestrator_session_id
         )
-        if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             yield "[ToolComplete] generate_image: Superseded by a newer request."
             return
         await emit_tool_event(

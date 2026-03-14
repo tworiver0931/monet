@@ -32,6 +32,8 @@ Workflow:
 - Use TypeScript only.
 - Use relative imports only.
 - All code must be complete and runnable. No placeholders, TODOs, or fake implementations.
+- Every file you return must be syntactically complete with balanced quotes, tags, braces, and parentheses.
+- Write normal human-readable source with line breaks and indentation. Never minify or collapse a file into a single line.
 - No external JavaScript API calls such as `fetch`, `XMLHttpRequest`, or `axios`.
 - CSS `@import` for fonts is allowed.
 

@@ -77,7 +77,6 @@ export default function Page() {
     sendImage,
     sendImageGenerationFrame,
     sendImageUpload,
-    sendRuntimeError,
     connectionState,
     codeJob,
     imageJob,
@@ -144,13 +143,6 @@ export default function Page() {
       console.error("Mic access denied:", err);
     }
   }, [sendAudio]);
-
-  const handleRuntimeError = useCallback(
-    (error: string) => {
-      sendRuntimeError(error);
-    },
-    [sendRuntimeError],
-  );
 
   const applyFiles = useCallback(
     (
@@ -235,6 +227,7 @@ export default function Page() {
   const lastExtractedStreamRef = useRef("");
   useEffect(() => {
     if (!streamText || !streamText.includes("```")) return;
+    if (codeJob?.status === "running") return;
 
     // Count fence markers; need at least 2 for one complete block.
     const fenceCount = streamText.split("```").length - 1;
@@ -256,7 +249,7 @@ export default function Page() {
     }));
 
     applyFiles(nextFiles);
-  }, [applyFiles, streamText]);
+  }, [applyFiles, codeJob?.status, streamText]);
 
   // Connect WebSocket on mount
   useEffect(() => {
@@ -317,6 +310,12 @@ export default function Page() {
     );
   }, []);
 
+  const handlePreviewFailed = useCallback((renderVersion: number) => {
+    setPendingPreviewVersion((current) =>
+      current !== null && renderVersion >= current ? null : current,
+    );
+  }, []);
+
   const showGenerationGlow =
     isCodeAgentGenerating ||
     (pendingPreviewVersion !== null &&
@@ -325,7 +324,7 @@ export default function Page() {
   return (
     <div className="relative h-dvh overflow-hidden">
       {timeoutReason && (
-        <div className="fixed inset-x-0 top-0 z-50 flex items-center justify-center bg-red-600 px-4 py-3 text-white text-sm font-medium">
+        <div className="fixed inset-x-0 top-0 z-50 flex items-center justify-center bg-red-600 px-4 py-3 text-sm font-medium text-white">
           {timeoutReason === "idle"
             ? "Session ended due to inactivity."
             : "Session ended — maximum duration reached."}
@@ -343,7 +342,6 @@ export default function Page() {
           sendImageGenerationFrame={sendImageGenerationFrame}
           sendText={sendText}
           sendImageUpload={sendImageUpload}
-          onRuntimeError={handleRuntimeError}
           bottomBarVisible={isBottomBarVisible}
           renderBottomBar={shouldRenderBottomBar}
           showGenerationGlow={showGenerationGlow}
@@ -352,6 +350,8 @@ export default function Page() {
           onGeneratedImageApplied={clearGeneratedImage}
           previewRenderVersion={previewRenderVersion}
           onPreviewRendered={handlePreviewRendered}
+          onPreviewFailed={handlePreviewFailed}
+          codeJobStatus={codeJob?.status ?? null}
           sessionId={sessionId}
           voiceControls={
             <BottomBarVoiceControls
