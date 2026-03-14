@@ -18,13 +18,14 @@ function parseFenceTag(tag: string): { language: string; path: string } {
   return { language, path };
 }
 
+const CODE_BLOCK_REGEX = /```([^\n]*)\n([\s\S]*?)\n```/g;
+
 export function extractAllCodeBlocks(input: string): Array<{
   code: string;
   language: string;
   path: string;
   fullMatch: string;
 }> {
-  const codeBlockRegex = /```([^\n]*)\n([\s\S]*?)\n```/g;
   const files: Array<{
     code: string;
     language: string;
@@ -32,8 +33,7 @@ export function extractAllCodeBlocks(input: string): Array<{
     fullMatch: string;
   }> = [];
 
-  let match;
-  while ((match = codeBlockRegex.exec(input)) !== null) {
+  for (const match of input.matchAll(CODE_BLOCK_REGEX)) {
     const fenceTag = match[1] || "";
     const code = match[2];
     const fullMatch = match[0];

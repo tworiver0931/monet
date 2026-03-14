@@ -192,20 +192,32 @@ async def generate_image(
         ]
 
         async def _generate_with_timeout():
-            async with asyncio.timeout(120):
-                return await client.aio.models.generate_content(
-                    model=IMAGE_GEN_MODEL,
-                    contents=[
-                        types.Content(role="user", parts=user_parts),
-                    ],
-                    config=types.GenerateContentConfig(
-                        system_instruction=_IMAGE_GEN_SYSTEM_INSTRUCTION,
-                        response_modalities=[types.Modality.IMAGE],
-                        image_config=types.ImageConfig(
-                            image_size="1K",
-                        ),
-                    ),
-                )
+            max_retries = 2
+            for attempt in range(max_retries + 1):
+                try:
+                    async with asyncio.timeout(120):
+                        return await client.aio.models.generate_content(
+                            model=IMAGE_GEN_MODEL,
+                            contents=[
+                                types.Content(role="user", parts=user_parts),
+                            ],
+                            config=types.GenerateContentConfig(
+                                system_instruction=_IMAGE_GEN_SYSTEM_INSTRUCTION,
+                                response_modalities=[types.Modality.IMAGE],
+                                image_config=types.ImageConfig(
+                                    image_size="1K",
+                                ),
+                            ),
+                        )
+                except (asyncio.TimeoutError, Exception) as exc:
+                    if attempt < max_retries:
+                        logger.warning(
+                            "Transient image generation error (attempt %d/%d): %s",
+                            attempt + 1, max_retries + 1, exc,
+                        )
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                    else:
+                        raise
 
         generate_task = asyncio.create_task(_generate_with_timeout())
         await wait_for_task_heartbeats(
@@ -217,7 +229,7 @@ async def generate_image(
             client_message="Still generating the image.",
         )
 
-        if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             yield "[ToolComplete] generate_image: Superseded by a newer request."
             return
 
@@ -286,7 +298,7 @@ async def generate_image(
             client_message="Saving the generated image.",
         )
 
-        if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             yield "[ToolComplete] generate_image: Superseded by a newer request."
             return
 
@@ -338,7 +350,7 @@ async def generate_image(
                 await asyncio.shield(_cancel_background_task(generate_task))
             except Exception:
                 logger.debug("Failed to cancel image generation task", exc_info=True)
-        if is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             try:
                 await asyncio.shield(
                     emit_tool_event(
@@ -358,7 +370,7 @@ async def generate_image(
         logger.exception(
             "Image generation failed for session %s", orchestrator_session_id
         )
-        if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             yield "[ToolComplete] generate_image: Superseded by a newer request."
             return
         await emit_tool_event(

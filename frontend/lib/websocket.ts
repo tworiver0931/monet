@@ -302,10 +302,7 @@ export class MonetWebSocket {
           if (pad) b64 += "=".repeat(4 - pad);
 
           const binaryStr = atob(b64);
-          const bytes = new Uint8Array(binaryStr.length);
-          for (let i = 0; i < binaryStr.length; i++) {
-            bytes[i] = binaryStr.charCodeAt(i);
-          }
+          const bytes = Uint8Array.from(binaryStr, (c) => c.charCodeAt(0));
           this.handlers.onAudio?.(bytes.buffer);
         }
       }

@@ -4,7 +4,7 @@
 
 # Monet
 
-### Turn your impressions into software.
+### Turn your impressions into software
 
 </div>
 
@@ -26,17 +26,6 @@ Monet reimagines software creation as a conversation. Instead of typing prompts 
 | **Image Generation**        | Draw a rough composition in the image frame, describe what you want, and Monet generates a polished image and integrates it into your app.     |
 | **Upload References**       | Drop in reference images (screenshots, design mockups, photos) and Monet uses them as context for code and image generation.                   |
 | **One-Click Deploy**        | Save and share your creation with a unique URL. Deployed apps are persisted and viewable by anyone.                                            |
-
-### How a Session Works
-
-```
-You speak          →  Monet listens and proposes a plan
-You approve        →  Monet generates code (live preview updates instantly)
-You sketch/draw    →  Monet sees annotations and adjusts the app
-You deploy         →  One-click share with a unique URL
-```
-
-Monet always explains its plan before acting. Nothing runs until you say "go ahead."
 
 ---
 

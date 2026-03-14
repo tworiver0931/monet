@@ -58,4 +58,5 @@ async def upload_public_blob(
         "application/octet-stream",
     )
 
-    return await asyncio.to_thread(_upload_sync, data, blob_name, resolved_content_type)
+    async with asyncio.timeout(90):
+        return await asyncio.to_thread(_upload_sync, data, blob_name, resolved_content_type)

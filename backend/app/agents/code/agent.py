@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 
 ToolEventEmitter = Callable[[dict[str, object]], Awaitable[None]]
 
+WAIT_FOR_TURN_SECONDS = 1.5
+POLL_INTERVAL_SECONDS = 0.05
+HEARTBEAT_INTERVAL_SECONDS = 4.0
+FAST_GENERATE_TIMEOUT_SECONDS = 120
+MAX_HISTORY_MESSAGES = 20
+
 
 @dataclass(slots=True)
 class ToolJob:
@@ -204,6 +210,25 @@ def _evict_stale_sessions() -> None:
         logger.info("Evicted %d stale sessions from registries", len(stale))
 
 
+_eviction_task: asyncio.Task | None = None
+
+def start_periodic_eviction() -> None:
+    """Start a background task that evicts stale sessions every 5 minutes."""
+    global _eviction_task
+    if _eviction_task is not None:
+        return
+
+    async def _periodic_eviction():
+        while True:
+            await asyncio.sleep(300)  # 5 minutes
+            try:
+                _evict_stale_sessions()
+            except Exception:
+                logger.debug("Periodic session eviction failed", exc_info=True)
+
+    _eviction_task = asyncio.create_task(_periodic_eviction())
+
+
 def register_live_state(session_id: str, state: dict) -> None:
     """Register live state for a session (called from main.py)."""
     state.setdefault("latest_user_turn_id", 0)
@@ -213,6 +238,7 @@ def register_live_state(session_id: str, state: dict) -> None:
     _touch_session(session_id)
     # Periodically evict stale sessions on registration
     _evict_stale_sessions()
+    start_periodic_eviction()
 
 
 def unregister_live_state(session_id: str) -> None:
@@ -245,11 +271,11 @@ async def record_user_turn(
         turn_id = _user_turn_ids.get(session_id, 0) + 1
         _user_turn_ids[session_id] = turn_id
 
-    live = get_live_state(session_id)
-    if live:
-        live["latest_user_turn_id"] = turn_id
-        live["latest_user_turn_source"] = source
-        live["latest_user_turn_text"] = text or ""
+        live = get_live_state(session_id)
+        if live:
+            live["latest_user_turn_id"] = turn_id
+            live["latest_user_turn_source"] = source
+            live["latest_user_turn_text"] = text or ""
     return turn_id
 
 
@@ -274,8 +300,8 @@ async def claim_tool_call_turn(
     session_id: str,
     tool_name: str,
     *,
-    wait_for_turn_seconds: float = 1.5,
-    poll_interval_seconds: float = 0.05,
+    wait_for_turn_seconds: float = WAIT_FOR_TURN_SECONDS,
+    poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
 ) -> tuple[bool, int, str]:
     """Allow at most one invocation of a given tool per real user turn."""
     async with _tool_job_lock:
@@ -344,13 +370,14 @@ async def begin_tool_job(
         return previous
 
 
-def is_current_tool_job(session_id: str, tool_name: str, job_id: str) -> bool:
+async def is_current_tool_job(session_id: str, tool_name: str, job_id: str) -> bool:
     """Check whether a job is still the current active job for this tool."""
-    session_jobs = _active_tool_jobs.get(session_id)
-    if session_jobs is None:
-        return False
-    job = session_jobs.get(tool_name)
-    return job is not None and job.job_id == job_id
+    async with _tool_job_lock:
+        session_jobs = _active_tool_jobs.get(session_id)
+        if session_jobs is None:
+            return False
+        job = session_jobs.get(tool_name)
+        return job is not None and job.job_id == job_id
 
 
 async def clear_tool_job(session_id: str, tool_name: str, job_id: str) -> None:
@@ -380,7 +407,7 @@ async def emit_client_event(session_id: str, payload: dict[str, object]) -> None
     try:
         await emitter(payload)
     except Exception:
-        logger.debug("Failed to emit client event for session %s", session_id, exc_info=True)
+        logger.warning("Failed to emit client event for session %s", session_id, exc_info=True)
 
 
 async def emit_tool_event(
@@ -428,17 +455,17 @@ async def wait_for_task_heartbeats(
     tool_name: str,
     stage: str,
     client_message: str,
-    interval_seconds: float = 4.0,
+    interval_seconds: float = HEARTBEAT_INTERVAL_SECONDS,
 ) -> None:
     """Emit periodic heartbeat updates while a background task is pending."""
     while not task.done():
-        if not is_current_tool_job(session_id, tool_name, job_id):
+        if not await is_current_tool_job(session_id, tool_name, job_id):
             await _cancel_background_task(task)
             return
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=interval_seconds)
         except asyncio.TimeoutError:
-            if not is_current_tool_job(session_id, tool_name, job_id):
+            if not await is_current_tool_job(session_id, tool_name, job_id):
                 await _cancel_background_task(task)
                 return
             await emit_tool_event(
@@ -540,17 +567,32 @@ async def _fast_generate(
     if session_id in _fast_mode_history:
         _fast_mode_history.move_to_end(session_id)
 
-    async with asyncio.timeout(120):
-        response = await client.aio.models.generate_content(
-            model=CODE_GEN_FAST_MODEL,
-            contents=history + [user_msg],
-            config=types.GenerateContentConfig(
-                system_instruction=instruction,
-                thinking_config=types.ThinkingConfig(thinking_level="medium"),
-                response_mime_type="application/json",
-                response_json_schema=CodeResponse.model_json_schema(),
-            ),
-        )
+    max_retries = 2
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            async with asyncio.timeout(FAST_GENERATE_TIMEOUT_SECONDS):
+                response = await client.aio.models.generate_content(
+                    model=CODE_GEN_FAST_MODEL,
+                    contents=history + [user_msg],
+                    config=types.GenerateContentConfig(
+                        system_instruction=instruction,
+                        thinking_config=types.ThinkingConfig(thinking_level="medium"),
+                        response_mime_type="application/json",
+                        response_json_schema=CodeResponse.model_json_schema(),
+                    ),
+                )
+            break
+        except (asyncio.TimeoutError, Exception) as exc:
+            last_error = exc
+            if attempt < max_retries:
+                logger.warning(
+                    "Transient code generation error (attempt %d/%d): %s",
+                    attempt + 1, max_retries + 1, exc,
+                )
+                await asyncio.sleep(0.5 * (attempt + 1))
+            else:
+                raise
 
     response_text = response.text or "{}"
 
@@ -587,8 +629,8 @@ async def _fast_generate(
     )
     history = history + [user_msg, model_msg]
     # Keep history bounded (last 10 turns = 20 messages)
-    if len(history) > 20:
-        history = history[-20:]
+    if len(history) > MAX_HISTORY_MESSAGES:
+        history = history[-MAX_HISTORY_MESSAGES:]
     _fast_mode_history[session_id] = history
 
     # Evict least-recently-used sessions if over capacity
@@ -717,13 +759,13 @@ async def generate_code(
                 client_message="Still generating the code update.",
             )
 
-            if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
                 yield "[ToolComplete] generate_code: Superseded by a newer request."
                 return
 
             updated_files, summary = await generate_task
 
-            if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
                 yield "[ToolComplete] generate_code: Superseded by a newer request."
                 return
 
@@ -848,7 +890,7 @@ async def generate_code(
             session_id=code_session_id,
             new_message=current_msg,
         ):
-            if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+            if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
                 yield "[ToolComplete] generate_code: Superseded by a newer request."
                 return
 
@@ -878,7 +920,7 @@ async def generate_code(
             if event.is_final_response() and event.content and event.content.parts:
                 summary = "".join(p.text for p in event.content.parts if p.text)
 
-        if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             yield "[ToolComplete] generate_code: Superseded by a newer request."
             return
 
@@ -901,7 +943,7 @@ async def generate_code(
                 await asyncio.shield(_cancel_background_task(generate_task))
             except Exception:
                 logger.debug("Failed to cancel fast code task", exc_info=True)
-        if is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             try:
                 await asyncio.shield(
                     emit_tool_event(
@@ -921,7 +963,7 @@ async def generate_code(
         logger.exception(
             "Code generation failed for session %s", orchestrator_session_id
         )
-        if not is_current_tool_job(orchestrator_session_id, tool_name, job_id):
+        if not await is_current_tool_job(orchestrator_session_id, tool_name, job_id):
             yield "[ToolComplete] generate_code: Superseded by a newer request."
             return
         await emit_tool_event(

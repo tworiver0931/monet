@@ -15,6 +15,7 @@ export class AudioPlayer {
   private onPlaybackState: ((isPlaying: boolean) => void) | null = null;
   private analyserData: Uint8Array<ArrayBuffer> | null = null;
   private analyserFrameId: number | null = null;
+  private throttleInterval: ReturnType<typeof setInterval> | null = null;
 
   async init(
     onLevel?: (level: number) => void,
@@ -77,6 +78,10 @@ export class AudioPlayer {
 
   async close(): Promise<void> {
     this.stop();
+    if (this.throttleInterval !== null) {
+      clearInterval(this.throttleInterval);
+      this.throttleInterval = null;
+    }
     if (this.analyserFrameId !== null) {
       cancelAnimationFrame(this.analyserFrameId);
       this.analyserFrameId = null;
@@ -100,7 +105,6 @@ export class AudioPlayer {
 
     let idleFrameCount = 0;
     const IDLE_THRESHOLD = 30; // ~0.5s at 60fps before throttling
-    let throttleInterval: ReturnType<typeof setInterval> | null = null;
 
     const computeLevel = () => {
       if (!this.analyserNode || !this.analyserData) return;
@@ -117,22 +121,22 @@ export class AudioPlayer {
 
       if (level < 0.005) {
         idleFrameCount++;
-        if (idleFrameCount > IDLE_THRESHOLD && !throttleInterval) {
+        if (idleFrameCount > IDLE_THRESHOLD && !this.throttleInterval) {
           // Switch to throttled polling when idle
           if (this.analyserFrameId !== null) {
             cancelAnimationFrame(this.analyserFrameId);
             this.analyserFrameId = null;
           }
-          throttleInterval = setInterval(() => {
+          this.throttleInterval = setInterval(() => {
             computeLevel();
           }, 100); // 10fps when idle
           return;
         }
       } else {
         idleFrameCount = 0;
-        if (throttleInterval) {
-          clearInterval(throttleInterval);
-          throttleInterval = null;
+        if (this.throttleInterval) {
+          clearInterval(this.throttleInterval);
+          this.throttleInterval = null;
         }
       }
 

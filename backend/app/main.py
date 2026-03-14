@@ -35,6 +35,9 @@ from .storage import upload_public_blob
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+MAX_FRAME_BYTES = 5 * 1024 * 1024  # 5 MB limit for stored frames
+LIVE_SESSION_TIMEOUT = 600  # 10 min max per live session connection
+
 WS_CLOSE_IDLE_TIMEOUT = 4000
 WS_CLOSE_HARD_LIMIT = 4001
 
@@ -99,7 +102,7 @@ class _CodeInterceptQueue(LiveRequestQueue):
         super().__init__()
         self._websocket = websocket
         self._ws_lock = ws_lock
-        self._transcript: collections.deque[str] = collections.deque(maxlen=200)
+        self._transcript: collections.deque[str] = collections.deque(maxlen=100)
 
     async def emit_client_event(self, payload: dict[str, object]) -> None:
         try:
@@ -243,8 +246,11 @@ async def upstream_task(
                     # Store latest frame for code agent access
                     live = _live_state_registry.get(session_id)
                     if live is not None:
-                        live["latest_frame"] = image_data
-                        live["latest_frame_mime"] = mime_type
+                        if len(image_data) <= MAX_FRAME_BYTES:
+                            live["latest_frame"] = image_data
+                            live["latest_frame_mime"] = mime_type
+                        else:
+                            logger.warning("Dropping oversized frame (%d bytes) for session %s", len(image_data), session_id)
                     image_blob = types.Blob(
                         mime_type=mime_type,
                         data=image_data,
@@ -259,8 +265,11 @@ async def upstream_task(
                         image_data = base64.b64decode(frame_data)
                         mime_type = msg.get("mimeType", "image/png")
                         if live is not None:
-                            live["latest_image_generation_frame"] = image_data
-                            live["latest_image_generation_frame_mime"] = mime_type
+                            if len(image_data) <= MAX_FRAME_BYTES:
+                                live["latest_image_generation_frame"] = image_data
+                                live["latest_image_generation_frame_mime"] = mime_type
+                            else:
+                                logger.warning("Dropping oversized generation frame (%d bytes)", len(image_data))
                     else:
                         if live is not None:
                             live["latest_image_generation_frame"] = None
@@ -312,106 +321,107 @@ async def downstream_task(
                 return
 
             try:
-                async for event in adk_runner.run_live(
-                    user_id=user_id,
-                    session_id=session_id,
-                    live_request_queue=live_request_queue,
-                    run_config=run_config,
-                ):
-                    if not _is_session_owner(session_id, connection_id):
-                        return
-
-                    # --- Event-level error handling ---
-                    if event.error_code:
-                        logger.error(
-                            "Event error: %s - %s",
-                            event.error_code,
-                            event.error_message,
-                        )
-                        terminal_errors = {
-                            "SAFETY",
-                            "PROHIBITED_CONTENT",
-                            "MAX_TOKENS",
-                        }
-                        error_payload = json.dumps({
-                            "type": "error",
-                            "errorCode": event.error_code,
-                            "message": event.error_message or str(event.error_code),
-                        })
-                        async with ws_lock:
-                            await websocket.send_text(error_payload)
-                        if event.error_code in terminal_errors:
-                            return
-                        continue
-
-                    # --- Fix 3: Send audio as binary frames ---
-                    has_audio = False
-                    if event.content and event.content.parts:
-                        has_audio = any(
-                            p.inline_data
-                            for p in event.content.parts
-                        )
-
-                    if has_audio:
-                        metadata = event.model_dump_json(
-                            exclude={
-                                "content": {
-                                    "parts": {
-                                        "__all__": {"inline_data"}
-                                    }
-                                }
-                            },
-                            exclude_none=True,
-                            by_alias=True,
-                        )
-                        async with ws_lock:
-                            for part in event.content.parts:
-                                if part.inline_data:
-                                    await websocket.send_bytes(
-                                        part.inline_data.data
-                                    )
-                            await websocket.send_text(metadata)
-                    else:
-                        event_json = event.model_dump_json(
-                            exclude_none=True, by_alias=True
-                        )
-                        async with ws_lock:
-                            await websocket.send_text(event_json)
-
-                    # Accumulate conversation transcript from audio
-                    # transcriptions (not model thinking text).
-                    transcript = live_request_queue._transcript
-                    input_transcription = getattr(event, "input_transcription", None)
-                    input_text = getattr(input_transcription, "text", "") or ""
-                    is_partial = getattr(event, "partial", True)
-                    if input_text:
-                        if not speech_turn_open:
-                            await record_user_turn(
-                                session_id,
-                                source="speech",
-                                text=input_text,
-                            )
-                            speech_turn_open = True
-                        elif not is_partial:
-                            live = _live_state_registry.get(session_id)
-                            if live is not None:
-                                live["latest_user_turn_text"] = input_text
-
-                        if not is_partial:
-                            transcript.append(f"user: {input_text}")
-                            speech_turn_open = False
-
-                    if (
-                        getattr(event, "output_transcription", None)
-                        and event.output_transcription.text
-                        and not getattr(event, "partial", True)
+                async with asyncio.timeout(LIVE_SESSION_TIMEOUT):
+                    async for event in adk_runner.run_live(
+                        user_id=user_id,
+                        session_id=session_id,
+                        live_request_queue=live_request_queue,
+                        run_config=run_config,
                     ):
-                        transcript.append(
-                            f"assistant: {event.output_transcription.text}"
-                        )
+                        if not _is_session_owner(session_id, connection_id):
+                            return
 
-                    if getattr(event, "turn_complete", False):
-                        speech_turn_open = False
+                        # --- Event-level error handling ---
+                        if event.error_code:
+                            logger.error(
+                                "Event error: %s - %s",
+                                event.error_code,
+                                event.error_message,
+                            )
+                            terminal_errors = {
+                                "SAFETY",
+                                "PROHIBITED_CONTENT",
+                                "MAX_TOKENS",
+                            }
+                            error_payload = json.dumps({
+                                "type": "error",
+                                "errorCode": event.error_code,
+                                "message": event.error_message or str(event.error_code),
+                            })
+                            async with ws_lock:
+                                await websocket.send_text(error_payload)
+                            if event.error_code in terminal_errors:
+                                return
+                            continue
+
+                        # --- Send audio as binary frames ---
+                        has_audio = False
+                        if event.content and event.content.parts:
+                            has_audio = any(
+                                p.inline_data
+                                for p in event.content.parts
+                            )
+
+                        if has_audio:
+                            metadata = event.model_dump_json(
+                                exclude={
+                                    "content": {
+                                        "parts": {
+                                            "__all__": {"inline_data"}
+                                        }
+                                    }
+                                },
+                                exclude_none=True,
+                                by_alias=True,
+                            )
+                            async with ws_lock:
+                                for part in event.content.parts:
+                                    if part.inline_data:
+                                        await websocket.send_bytes(
+                                            part.inline_data.data
+                                        )
+                                await websocket.send_text(metadata)
+                        else:
+                            event_json = event.model_dump_json(
+                                exclude_none=True, by_alias=True
+                            )
+                            async with ws_lock:
+                                await websocket.send_text(event_json)
+
+                        # Accumulate conversation transcript from audio
+                        # transcriptions (not model thinking text).
+                        transcript = live_request_queue._transcript
+                        input_transcription = getattr(event, "input_transcription", None)
+                        input_text = getattr(input_transcription, "text", "") or ""
+                        is_partial = getattr(event, "partial", True)
+                        if input_text:
+                            if not speech_turn_open:
+                                await record_user_turn(
+                                    session_id,
+                                    source="speech",
+                                    text=input_text,
+                                )
+                                speech_turn_open = True
+                            elif not is_partial:
+                                live = _live_state_registry.get(session_id)
+                                if live is not None:
+                                    live["latest_user_turn_text"] = input_text
+
+                            if not is_partial:
+                                transcript.append(f"user: {input_text}")
+                                speech_turn_open = False
+
+                        if (
+                            getattr(event, "output_transcription", None)
+                            and event.output_transcription.text
+                            and not getattr(event, "partial", True)
+                        ):
+                            transcript.append(
+                                f"assistant: {event.output_transcription.text}"
+                            )
+
+                        if getattr(event, "turn_complete", False):
+                            speech_turn_open = False
 
                 return
             except genai_errors.APIError as e:

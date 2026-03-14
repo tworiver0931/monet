@@ -16,6 +16,7 @@ export class AudioRecorder {
   private onLevel: ((level: number) => void) | null = null;
   private analyserData: Uint8Array<ArrayBuffer> | null = null;
   private analyserFrameId: number | null = null;
+  private throttleInterval: ReturnType<typeof setInterval> | null = null;
 
   async start(
     onData: (pcmBuffer: ArrayBuffer) => void,
@@ -71,6 +72,10 @@ export class AudioRecorder {
   }
 
   stop(): void {
+    if (this.throttleInterval !== null) {
+      clearInterval(this.throttleInterval);
+      this.throttleInterval = null;
+    }
     if (this.analyserFrameId !== null) {
       cancelAnimationFrame(this.analyserFrameId);
       this.analyserFrameId = null;
@@ -115,7 +120,6 @@ export class AudioRecorder {
 
     let idleFrameCount = 0;
     const IDLE_THRESHOLD = 30;
-    let throttleInterval: ReturnType<typeof setInterval> | null = null;
 
     const computeLevel = () => {
       if (!this.analyserNode || !this.analyserData) return;
@@ -132,21 +136,21 @@ export class AudioRecorder {
 
       if (level < 0.005) {
         idleFrameCount++;
-        if (idleFrameCount > IDLE_THRESHOLD && !throttleInterval) {
+        if (idleFrameCount > IDLE_THRESHOLD && !this.throttleInterval) {
           if (this.analyserFrameId !== null) {
             cancelAnimationFrame(this.analyserFrameId);
             this.analyserFrameId = null;
           }
-          throttleInterval = setInterval(() => {
+          this.throttleInterval = setInterval(() => {
             computeLevel();
           }, 100);
           return;
         }
       } else {
         idleFrameCount = 0;
-        if (throttleInterval) {
-          clearInterval(throttleInterval);
-          throttleInterval = null;
+        if (this.throttleInterval) {
+          clearInterval(this.throttleInterval);
+          this.throttleInterval = null;
         }
       }
 
