@@ -108,25 +108,109 @@ def _code_agent_instruction(context) -> str:
 
 def _append_uploaded_images(base: str, images: list) -> str:
     """Append uploaded image references to the instruction if available."""
-    if not images:
+    block = _format_uploaded_images_block(images)
+    if not block:
         return base
-    lines = []
-    for img in images:
-        if isinstance(img, dict):
-            lines.append(f"- \"{img['name']}\": {img['url']}")
-        else:
-            lines.append(f"- {img}")
     return base + (
-        "\n\n## Uploaded Images\n\n"
-        "The user has uploaded the following images. "
-        "Use these URLs directly in <img> tags or CSS background-image "
-        "when the user wants to include them:\n"
-        + "\n".join(lines)
+        "\n\n"
+        + block
         + "\n\n"
-        "You may also receive a screenshot of the current app preview. "
-        "User-uploaded images are tagged with labels like 'Image 1', "
-        "'Image 2' in the screenshot for identification."
+        "When the request mentions an uploaded image label such as `Image 1`, "
+        "use the matching public URL from the uploaded-images list directly "
+        "instead of inferring from filenames or screenshot order."
     )
+
+
+def _normalize_uploaded_image_record(img: object, index: int) -> dict[str, str] | None:
+    """Normalize uploaded image metadata for prompt assembly."""
+    if isinstance(img, dict):
+        url = img.get("url", "")
+        if not isinstance(url, str) or not url:
+            return None
+        name = img.get("name", "uploaded_image")
+        if not isinstance(name, str) or not name:
+            name = "uploaded_image"
+        label = img.get("label", f"Image {index}")
+        if not isinstance(label, str) or not label:
+            label = f"Image {index}"
+        image_id = img.get("id", "")
+        if not isinstance(image_id, str):
+            image_id = ""
+        source = img.get("source", "user_upload")
+        if not isinstance(source, str) or not source:
+            source = "user_upload"
+        return {
+            "id": image_id,
+            "label": label,
+            "name": name,
+            "url": url,
+            "source": source,
+        }
+    if isinstance(img, str) and img:
+        return {
+            "id": "",
+            "label": f"Image {index}",
+            "name": f"uploaded-image-{index}",
+            "url": img,
+            "source": "user_upload",
+        }
+    return None
+
+
+def _normalize_uploaded_images(images: list) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for index, img in enumerate(images, start=1):
+        record = _normalize_uploaded_image_record(img, index)
+        if record is not None:
+            normalized.append(record)
+    return normalized
+
+
+def _format_uploaded_images_block(images: list) -> str:
+    normalized = _normalize_uploaded_images(images)
+    if not normalized:
+        return ""
+
+    lines = [
+        "## Uploaded Images",
+        "",
+        "Use these public URLs directly in `<img>` tags or CSS background-image.",
+        "When a request mentions `Image N`, use the matching label below.",
+    ]
+    for image in normalized:
+        source_suffix = ""
+        if image["source"] != "user_upload":
+            source_suffix = f" [source={image['source']}]"
+        lines.append(
+            f'- `{image["label"]}` -> "{image["name"]}" -> {image["url"]}{source_suffix}'
+        )
+    return "\n".join(lines)
+
+
+def _build_generate_code_prompt_text(
+    *,
+    prompt: str,
+    transcript_entries: list[str],
+    latest_user_turn_text: str,
+    uploaded_images: list,
+) -> str:
+    """Build the per-call user prompt with explicit request priority."""
+    sections = []
+    uploaded_images_block = _format_uploaded_images_block(uploaded_images)
+    if uploaded_images_block:
+        sections.append(uploaded_images_block)
+
+    sections.append("## Latest Approved Request\n\n" + prompt)
+
+    latest_turn = latest_user_turn_text.strip()
+    if latest_turn:
+        sections.append("## Latest User Turn\n\n" + latest_turn)
+
+    recent_entries = transcript_entries[-12:]
+    if recent_entries:
+        sections.append("## Recent Conversation Context\n\n" + "\n".join(recent_entries))
+
+    return "\n\n".join(sections)
 
 
 _code_agent_tools = [
@@ -369,6 +453,30 @@ def build_tool_turn_gate_error(
     )
 
 
+def build_tool_already_running_error(
+    tool_name: str,
+    *,
+    active_job_id: str | None = None,
+) -> str:
+    """Return a tool result for rejected same-tool re-entry while running."""
+    job_suffix = f" Active job id: {active_job_id}." if active_job_id else ""
+    return (
+        f"[ToolError] {tool_name}: This tool is already running for the current "
+        "session. Do not call it again right now. Wait until the active run "
+        "finishes, fails, or is cancelled before calling the same tool again."
+        + job_suffix
+    )
+
+
+async def get_active_tool_job(session_id: str, tool_name: str) -> ToolJob | None:
+    """Return the currently active job for a tool, if any."""
+    async with _get_session_lock(session_id):
+        session_jobs = _active_tool_jobs.get(session_id)
+        if session_jobs is None:
+            return None
+        return session_jobs.get(tool_name)
+
+
 async def begin_tool_job(
     session_id: str,
     tool_name: str,
@@ -523,7 +631,7 @@ def _build_user_message_with_files(
         parts_text += format_files_as_code_blocks(code_files)
         parts_text += "\n\n"
 
-    parts_text += "## Request\n\n" + prompt_text
+    parts_text += prompt_text
 
     msg_parts: list[types.Part] = [types.Part(text=parts_text)]
     if latest_frame:
@@ -705,17 +813,28 @@ async def generate_code(
 
     job_cleared = False
     generate_task: asyncio.Task | None = None
-    previous_job = await begin_tool_job(orchestrator_session_id, tool_name, job_id)
-    if previous_job is not None and previous_job.job_id != job_id:
+    active_job = await get_active_tool_job(orchestrator_session_id, tool_name)
+    if active_job is not None and active_job.job_id != job_id:
         await emit_tool_event(
             orchestrator_session_id,
-            event_type="tool_cancelled",
-            tool_name=previous_job.tool_name,
-            job_id=previous_job.job_id,
-            stage="cancelled",
-            message="Superseded by a newer tool request.",
-            reason="superseded",
+            event_type="tool_failed",
+            tool_name=tool_name,
+            job_id=job_id,
+            stage="rejected",
+            message=(
+                f"{tool_name} is already running. Wait for the active run "
+                "to finish before starting another one."
+            ),
+            reason="already_running",
+            activeJobId=active_job.job_id,
         )
+        yield build_tool_already_running_error(
+            tool_name,
+            active_job_id=active_job.job_id,
+        )
+        return
+
+    await begin_tool_job(orchestrator_session_id, tool_name, job_id)
 
     await emit_tool_event(
         orchestrator_session_id,
@@ -738,6 +857,9 @@ async def generate_code(
         transcript = live.get("transcript", [])
         latest_frame = live.get("latest_frame")
         latest_mime = live.get("latest_frame_mime", "image/jpeg")
+        latest_user_turn_text = live.get("latest_user_turn_text", "")
+        if not isinstance(latest_user_turn_text, str):
+            latest_user_turn_text = ""
 
         if fast_mode:
             # ----- Fast mode: single LLM call, structured JSON output -----
@@ -747,20 +869,12 @@ async def generate_code(
             new_entries = list(itertools.islice(transcript, offset, None))
             live["_fast_transcript_offset"] = len(transcript)
 
-            if new_entries:
-                prompt_text = (
-                    "The following conversation took place between the user and the "
-                    "voice assistant since your last invocation:\n\n"
-                    + "\n".join(new_entries)
-                    + "\n\n"
-                    "Based on the above conversation, the voice assistant is now "
-                    "requesting the following:\n\n"
-                    + prompt
-                )
-            else:
-                prompt_text = (
-                    "The voice assistant is requesting the following:\n\n" + prompt
-                )
+            prompt_text = _build_generate_code_prompt_text(
+                prompt=prompt,
+                transcript_entries=new_entries,
+                latest_user_turn_text=latest_user_turn_text,
+                uploaded_images=uploaded_images,
+            )
 
             generate_task = asyncio.create_task(
                 _fast_generate(
@@ -870,20 +984,12 @@ async def generate_code(
             len(new_entries),
         )
 
-        if new_entries:
-            prompt_text = (
-                "The following conversation took place between the user and the "
-                "voice assistant since your last invocation:\n\n"
-                + "\n".join(new_entries)
-                + "\n\n"
-                "Based on the above conversation, the voice assistant is now "
-                "requesting the following:\n\n"
-                + prompt
-            )
-        else:
-            prompt_text = (
-                "The voice assistant is requesting the following:\n\n" + prompt
-            )
+        prompt_text = _build_generate_code_prompt_text(
+            prompt=prompt,
+            transcript_entries=new_entries,
+            latest_user_turn_text=latest_user_turn_text,
+            uploaded_images=uploaded_images,
+        )
 
         msg_parts = [types.Part(text=prompt_text)]
         if latest_frame:

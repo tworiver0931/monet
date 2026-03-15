@@ -5,6 +5,7 @@ import {
   MonetWebSocket,
   type CodePayload,
   type GeneratedImagePayload,
+  type UploadedImageRecord,
   type ToolLifecyclePayload,
   type ToolName,
   type WSEventHandlers,
@@ -384,8 +385,8 @@ export function useWebSocket(
     [],
   );
 
-  const sendImageUpload = useCallback((url: string, name: string) => {
-    wsRef.current?.sendImageUpload(url, name);
+  const sendImageUpload = useCallback((image: UploadedImageRecord) => {
+    wsRef.current?.sendImageUpload(image);
   }, []);
 
   const sendRuntimeError = useCallback((error: string) => {

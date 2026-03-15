@@ -35,6 +35,14 @@ export type GeneratedImagePayload = {
   data?: string;
 };
 
+export type UploadedImageRecord = {
+  id: string;
+  label: string;
+  name: string;
+  url: string;
+  source: "user_upload" | "generated_image";
+};
+
 function parseToolName(value: unknown): ToolName | null {
   if (value === "generate_code" || value === "generate_image") {
     return value;
@@ -344,9 +352,9 @@ export class MonetWebSocket {
     }
   }
 
-  sendImageUpload(url: string, name: string): void {
+  sendImageUpload(image: UploadedImageRecord): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "image_upload", url, name }));
+      this.ws.send(JSON.stringify({ type: "image_upload", image }));
     }
   }
 

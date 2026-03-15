@@ -11,6 +11,8 @@ import {
 } from "tldraw";
 import "tldraw/tldraw.css";
 
+import type { UploadedImageRecord } from "@/lib/websocket";
+
 const PEN_COLOR = "blue";
 
 function TransparentBackground() {
@@ -19,7 +21,7 @@ function TransparentBackground() {
 
 export type TldrawTool = "select" | "draw" | "eraser" | "text" | "frame";
 
-export type UploadFileFn = (file: File) => Promise<{ url: string }>;
+export type UploadFileFn = (file: File) => Promise<UploadedImageRecord>;
 
 function isShapeWithinFrame(
   editor: Editor,
@@ -87,7 +89,7 @@ function fileToDataUrl(file: File): Promise<string> {
 
 function createAssetStore(
   uploadFile?: UploadFileFn,
-  onAssetUpload?: (url: string, name: string) => void,
+  onAssetUpload?: (image: UploadedImageRecord) => void,
 ): TLAssetStore {
   return {
     async upload(_asset, file) {
@@ -97,12 +99,11 @@ function createAssetStore(
       // Upload to server in the background for the agent to use in generated code
       if (uploadFile) {
         uploadFile(file)
-          .then(({ url }) => {
-            onAssetUpload?.(url, file.name);
+          .then((image) => {
+            onAssetUpload?.(image);
           })
           .catch(() => {
-            // Still notify with data URL as fallback
-            onAssetUpload?.(dataUrl, file.name);
+            // Keep the canvas image visible even if background upload fails.
           });
       }
 
@@ -124,7 +125,7 @@ export default function TldrawOverlay({
   onMount?: (editor: Editor) => void;
   tool?: TldrawTool;
   uploadFile?: UploadFileFn;
-  onAssetUpload?: (url: string, name: string) => void;
+  onAssetUpload?: (image: UploadedImageRecord) => void;
   generationFrameId?: TLShapeId | null;
   isImageGenerationActive?: boolean;
   onGenerationFrameChange?: (frameId: TLShapeId | null) => void;

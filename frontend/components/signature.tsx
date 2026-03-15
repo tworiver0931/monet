@@ -6,6 +6,8 @@ import opentype from "opentype.js";
 // Module-level font cache to avoid reloading on every render
 let _cachedFont: opentype.Font | null = null;
 let _fontLoadPromise: Promise<opentype.Font | null> | null = null;
+const _loadedImages = new Set<string>();
+const _imageLoadPromises = new Map<string, Promise<void>>();
 
 async function getCachedFont(): Promise<opentype.Font | null> {
   if (_cachedFont) return _cachedFont;
@@ -29,6 +31,53 @@ async function getCachedFont(): Promise<opentype.Font | null> {
   })();
 
   return _fontLoadPromise;
+}
+
+async function ensureImageLoaded(src: string): Promise<void> {
+  if (_loadedImages.has(src)) {
+    return;
+  }
+
+  const existingPromise = _imageLoadPromises.get(src);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const loadPromise = new Promise<void>((resolve, reject) => {
+    const image = new window.Image();
+
+    image.onload = () => {
+      _loadedImages.add(src);
+      resolve();
+    };
+    image.onerror = () => {
+      reject(new Error(`Failed to load image: ${src}`));
+    };
+    image.src = src;
+
+    if (image.complete) {
+      _loadedImages.add(src);
+      resolve();
+      return;
+    }
+
+    if (typeof image.decode === "function") {
+      void image.decode().then(
+        () => {
+          _loadedImages.add(src);
+          resolve();
+        },
+        () => {
+          // Keep the onload fallback above for browsers where decode fails.
+        },
+      );
+    }
+  }).finally(() => {
+    _imageLoadPromises.delete(src);
+  });
+
+  _imageLoadPromises.set(src, loadPromise);
+  return loadPromise;
 }
 
 interface SignatureProps {
@@ -58,6 +107,7 @@ export function Signature({
   const [viewBox, setViewBox] = useState("0 0 300 100");
   const [svgWidth, setSvgWidth] = useState(300);
   const [svgHeight, setSvgHeight] = useState(100);
+  const [isAssetReady, setIsAssetReady] = useState(false);
   const svgRef = useRef<SVGSVGElement>(null);
   const [patternOffset, setPatternOffset] = useState({ x: 0, y: 0 });
   const [viewportSize, setViewportSize] = useState({ w: 1920, h: 1080 });
@@ -65,6 +115,7 @@ export function Signature({
   const maskId = `signature-reveal-${uniqueId}`;
   const patternId = `signature-pattern-${uniqueId}`;
   const fillColor = imageUrl ? `url(#${patternId})` : color;
+  const isReady = paths.length > 0 && isAssetReady;
 
   const updatePatternPosition = useCallback(() => {
     if (!svgRef.current || !imageUrl) return;
@@ -93,8 +144,13 @@ export function Signature({
 
   useEffect(() => {
     async function load() {
+      setIsAssetReady(false);
+
       try {
-        const font = await getCachedFont();
+        const [font] = await Promise.all([
+          getCachedFont(),
+          imageUrl ? ensureImageLoaded(imageUrl) : Promise.resolve(),
+        ]);
 
         if (!font) {
           throw new Error("Font could not be loaded from any path");
@@ -102,7 +158,6 @@ export function Signature({
 
         const scale = fontSize / font.unitsPerEm;
         const ascender = font.ascender * scale;
-        const descender = Math.abs(font.descender) * scale;
         const padding = fontSize * 0.15;
         const baseline = padding + ascender;
 
@@ -134,26 +189,42 @@ export function Signature({
         setSvgWidth(totalWidth);
         setSvgHeight(totalHeight);
         setViewBox(`0 0 ${totalWidth} ${totalHeight}`);
+        setIsAssetReady(true);
       } catch {
         setPaths([]);
         setSvgWidth(text.length * fontSize * 0.6);
         setSvgHeight(fontSize * 2);
         setViewBox(`0 0 ${text.length * fontSize * 0.6} ${fontSize * 2}`);
+        setIsAssetReady(true);
       }
     }
 
     load();
-  }, [text, fontSize]);
+  }, [fontSize, imageUrl, text]);
 
   const variants = {
     hidden: { pathLength: 0, opacity: 0 },
     visible: { pathLength: 1, opacity: 1 },
   };
 
+  if (!isReady) {
+    return (
+      <svg
+        width={svgWidth}
+        height={svgHeight}
+        viewBox={viewBox}
+        fill="none"
+        className={className}
+        aria-hidden="true"
+        style={{ visibility: "hidden" }}
+      />
+    );
+  }
+
   return (
     <motion.svg
       ref={svgRef}
-      key={paths.length}
+      key={`${text}-${fontSize}-${imageUrl ?? "solid"}`}
       width={svgWidth}
       height={svgHeight}
       viewBox={viewBox}

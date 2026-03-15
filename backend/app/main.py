@@ -49,6 +49,48 @@ WS_CLOSE_HARD_LIMIT = 4001
 _session_connections_lock = asyncio.Lock()
 _active_session_connections: dict[str, tuple[str, WebSocket]] = {}
 
+
+def _normalize_uploaded_image_record(
+    payload: object,
+    *,
+    default_name: str = "uploaded_image",
+    index_hint: int | None = None,
+    source: str = "user_upload",
+) -> dict[str, str] | None:
+    """Return a normalized uploaded-image record or ``None``."""
+    if not isinstance(payload, dict):
+        return None
+
+    url = payload.get("url", "")
+    if not isinstance(url, str) or not url:
+        return None
+
+    name = payload.get("name", default_name)
+    if not isinstance(name, str) or not name:
+        name = default_name
+
+    label = payload.get("label", "")
+    if not isinstance(label, str) or not label:
+        next_index = index_hint or 1
+        label = f"Image {next_index}"
+
+    image_id = payload.get("id", "")
+    if not isinstance(image_id, str) or not image_id:
+        image_id = uuid.uuid4().hex
+
+    image_source = payload.get("source", source)
+    if not isinstance(image_source, str) or not image_source:
+        image_source = source
+
+    return {
+        "id": image_id,
+        "label": label,
+        "name": name,
+        "url": url,
+        "source": image_source,
+    }
+
+
 def _is_session_owner(session_id: str, connection_id: str) -> bool:
     entry = _active_session_connections.get(session_id)
     return entry is not None and entry[0] == connection_id
@@ -281,14 +323,38 @@ async def upstream_task(
                             live["latest_image_generation_frame_mime"] = "image/png"
 
                 elif msg_type == "image_upload":
-                    url = msg.get("url", "")
-                    name = msg.get("name", "uploaded_image")
+                    image_payload = msg.get("image")
+                    if not isinstance(image_payload, dict):
+                        image_payload = {
+                            "url": msg.get("url", ""),
+                            "name": msg.get("name", "uploaded_image"),
+                            "source": "user_upload",
+                        }
                     live = _live_state_registry.get(session_id)
-                    if url and live is not None:
+                    if live is not None:
                         images = live.get("uploaded_images", [])
-                        images.append({"name": name, "url": url})
+                        image = _normalize_uploaded_image_record(
+                            image_payload,
+                            index_hint=len(images) + 1,
+                            source="user_upload",
+                        )
+                        if image is None:
+                            continue
+                        images.append(image)
                         live["uploaded_images"] = images
-                        logger.info("Tracked uploaded image: %s -> %s", name, url)
+                        session = await session_service.get_session(
+                            app_name=APP_NAME,
+                            user_id=user_id,
+                            session_id=session_id,
+                        )
+                        if session is not None:
+                            session.state["uploaded_images"] = list(images)
+                        logger.info(
+                            "Tracked uploaded image: %s (%s) -> %s",
+                            image["label"],
+                            image["name"],
+                            image["url"],
+                        )
 
     except WebSocketDisconnect:
         logger.info("Client disconnected (upstream)")
@@ -495,7 +561,17 @@ async def websocket_endpoint(
     last_activity: list[float] = [session_start]
 
     session.state["_conversation_transcript"] = live_request_queue._transcript
-    session.state.setdefault("uploaded_images", [])
+    raw_uploaded_images = session.state.get("uploaded_images", [])
+    normalized_uploaded_images: list[dict[str, str]] = []
+    for index, raw_image in enumerate(raw_uploaded_images, start=1):
+        image = _normalize_uploaded_image_record(
+            raw_image,
+            index_hint=index,
+            source="user_upload",
+        )
+        if image is not None:
+            normalized_uploaded_images.append(image)
+    session.state["uploaded_images"] = normalized_uploaded_images
 
     # Register all live state directly so the code agent can access them
     # without going through ADK's state proxy (which may copy/snapshot values,

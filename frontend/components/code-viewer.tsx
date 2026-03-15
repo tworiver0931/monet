@@ -2,7 +2,11 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { domToPng } from "modern-screenshot";
-import type { CodeFile, GeneratedImagePayload } from "@/lib/websocket";
+import type {
+  CodeFile,
+  GeneratedImagePayload,
+  UploadedImageRecord,
+} from "@/lib/websocket";
 import { AssetRecordType, type Editor, type TLShapeId } from "tldraw";
 import {
   removeFrameWithContents,
@@ -106,7 +110,7 @@ export default function CodeViewer({
     mimeType?: string,
   ) => void;
   sendText?: (text: string) => void;
-  sendImageUpload?: (url: string, name: string) => void;
+  sendImageUpload?: (image: UploadedImageRecord) => void;
   pauseFrameStreaming?: boolean;
   renderBottomBar?: boolean;
   bottomBarVisible?: boolean;
@@ -161,8 +165,17 @@ export default function CodeViewer({
   const compositingCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const tldrawContainerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadCounterRef = useRef(0);
 
   const uploadFile: UploadFileFn = useCallback(async (file: File) => {
+    uploadCounterRef.current += 1;
+    const image: UploadedImageRecord = {
+      id: crypto.randomUUID(),
+      label: `Image ${uploadCounterRef.current}`,
+      name: file.name,
+      url: "",
+      source: "user_upload",
+    };
     const formData = new FormData();
     formData.append("file", file);
     const backendUrl =
@@ -173,7 +186,7 @@ export default function CodeViewer({
     });
     if (!res.ok) throw new Error("Upload failed");
     const { url } = await res.json();
-    return { url };
+    return { ...image, url };
   }, []);
 
   const safeFiles = useMemo(
@@ -860,11 +873,11 @@ export default function CodeViewer({
   }, [compositeAndSend, pauseFrameStreaming, reportRenderedVersion]);
 
   const onAssetUpload = useCallback(
-    (url: string, name: string) => {
+    (image: UploadedImageRecord) => {
       sendText?.(
-        `[User uploaded an image: "${name}" — URL: ${url} . Do NOT generate code yet. Wait for the user to tell you what to do with this image.]`,
+        `[User uploaded ${image.label}: "${image.name}" — URL: ${image.url} . Do NOT generate code yet. Wait for the user to tell you what to do with this image.]`,
       );
-      sendImageUpload?.(url, name);
+      sendImageUpload?.(image);
     },
     [sendText, sendImageUpload],
   );
@@ -929,7 +942,7 @@ export default function CodeViewer({
             blur={16}
             brightness={40}
             opacity={0.92}
-            backgroundOpacity={0.55}
+            backgroundOpacity={0.75}
             saturation={1.2}
             style={{
               boxShadow:

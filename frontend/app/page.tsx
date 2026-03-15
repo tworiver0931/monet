@@ -63,31 +63,29 @@ export default function Home() {
         }`}
       >
         <div className="flex grow flex-col items-center justify-center px-4">
-          <span className="mb-6 inline-flex shrink-0 items-center rounded-full border-[0.5px] border-[#BABABA] px-3.5 py-1.5 text-black">
-            <span className="text-center text-base text-neutral-900">
-              <BlurReveal as="span" delay={1.5} speedReveal={4} inView>
-                Powered by
-              </BlurReveal>{" "}
-              <BlurReveal
-                as="span"
-                className="font-semibold"
-                delay={1.68}
-                speedReveal={2}
-                inView
-              >
-                Gemini
-              </BlurReveal>
-              <BlurReveal as="span" delay={2.27} speedReveal={4} inView>
-                .
-              </BlurReveal>
-            </span>
+          <span className="mb-6 text-center text-base text-neutral-900">
+            <BlurReveal as="span" delay={1.5} speedReveal={4} inView>
+              Powered by
+            </BlurReveal>{" "}
+            <BlurReveal
+              as="span"
+              className="font-semibold"
+              delay={1.68}
+              speedReveal={2}
+              inView
+            >
+              Gemini
+            </BlurReveal>
+            <BlurReveal as="span" delay={2.27} speedReveal={4} inView>
+              .
+            </BlurReveal>
           </span>
 
           <Signature
             text="Monet"
-            fontSize={54}
+            fontSize={56}
             imageUrl="/title-text-img.webp"
-            duration={1}
+            duration={1.5}
             inView
           />
 
@@ -110,7 +108,7 @@ export default function Home() {
               className="mt-8 hover:-translate-y-0.5"
               innerClassName="min-w-[144px]"
             >
-              <span className="font-semibold text-neutral-800">
+              <span className="font-medium text-neutral-800">
                 Start Building
               </span>
             </LiquidGlassButton>

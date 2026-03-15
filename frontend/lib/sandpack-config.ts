@@ -135,7 +135,7 @@ import { domToJpeg } from "modern-screenshot";
 const FRAME_SOURCE = "sandpack-preview-capture";
 const FRAME_CONTROL_SOURCE = "sandpack-preview-control";
 const CAPTURE_DEBOUNCE_MS = 250;
-const CAPTURE_INTERVAL_MS = 1000;
+const CAPTURE_INTERVAL_MS = 1500;
 const PREVIEW_RENDER_VERSION = ${renderVersion};
 
 export function PreviewCaptureRoot({

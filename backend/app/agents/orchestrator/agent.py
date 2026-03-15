@@ -32,15 +32,6 @@ class JsonSchemaFunctionTool(FunctionTool):
             ignore_params=self._ignore_params,
         )
 
-
-def stop_streaming(function_name: str) -> dict[str, str]:
-    """Stop an active streaming tool by name.
-
-    ADK intercepts this tool in live mode and cancels the named async-generator
-    tool task when it is currently running.
-    """
-    return {"status": f"Stop requested for {function_name}."}
-
 agent = Agent(
     name="monet_orchestrator",
     model=ORCHESTRATOR_MODEL,
@@ -48,6 +39,5 @@ agent = Agent(
     tools=[
         JsonSchemaFunctionTool(func=generate_code),
         JsonSchemaFunctionTool(func=generate_image),
-        JsonSchemaFunctionTool(func=stop_streaming),
     ],
 )

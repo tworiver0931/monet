@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import uuid
 from typing import AsyncGenerator
 from typing import cast
 
@@ -19,11 +20,13 @@ from ...storage import upload_public_blob
 from ..code.agent import (
     _cancel_background_task,
     begin_tool_job,
+    build_tool_already_running_error,
     build_tool_turn_gate_error,
     claim_tool_call_turn,
     clear_tool_job,
     emit_client_event,
     emit_tool_event,
+    get_active_tool_job,
     get_live_state,
     get_tool_job_id,
     is_current_tool_job,
@@ -41,11 +44,19 @@ _IMAGE_GEN_SYSTEM_INSTRUCTION = (
     "Guidelines:\n"
     "- Follow the user's text prompt as the primary instruction for style, subject, "
     "and mood.\n"
-    "- Use the reference image to infer spatial arrangement and composition.\n"
+    "- Use the reference image only to infer spatial arrangement, composition, "
+    "relative scale, and rough placement.\n"
     "- The reference image likely contains blue pen sketches drawn by the user. "
     "These blue strokes are rough guides indicating shapes, layout, or intent — "
     "do NOT reproduce them as blue lines or adopt a blue pen sketch style. "
-    "Instead, interpret what the sketches represent and render them as polished, "
+    "Treat them like temporary markup layered on top of the scene, not like an "
+    "artistic reference.\n"
+    "- Ignore sketch-specific visual properties from the reference, including line "
+    "quality, stroke weight, hand-drawn texture, scribbles, annotation marks, and "
+    "the blue pen color itself.\n"
+    "- Do not copy the reference image's medium or finish unless the user's text "
+    "prompt explicitly asks for that exact look.\n"
+    "- Instead, interpret what the sketches represent and render them as polished, "
     "realistic or stylized visuals according to the text prompt.\n"
     "- Generate a clean, visually appealing image suitable for use in a web application. "
     "The final output must NOT look like a sketch or drawing unless the user's prompt "
@@ -125,17 +136,28 @@ async def generate_image(
     generate_task: asyncio.Task | None = None
     upload_task: asyncio.Task | None = None
 
-    previous_job = await begin_tool_job(orchestrator_session_id, tool_name, job_id)
-    if previous_job is not None and previous_job.job_id != job_id:
+    active_job = await get_active_tool_job(orchestrator_session_id, tool_name)
+    if active_job is not None and active_job.job_id != job_id:
         await emit_tool_event(
             orchestrator_session_id,
-            event_type="tool_cancelled",
-            tool_name=previous_job.tool_name,
-            job_id=previous_job.job_id,
-            stage="cancelled",
-            message="Superseded by a newer tool request.",
-            reason="superseded",
+            event_type="tool_failed",
+            tool_name=tool_name,
+            job_id=job_id,
+            stage="rejected",
+            message=(
+                f"{tool_name} is already running. Wait for the active run "
+                "to finish before starting another one."
+            ),
+            reason="already_running",
+            activeJobId=active_job.job_id,
         )
+        yield build_tool_already_running_error(
+            tool_name,
+            active_job_id=active_job.job_id,
+        )
+        return
+
+    await begin_tool_job(orchestrator_session_id, tool_name, job_id)
 
     await emit_tool_event(
         orchestrator_session_id,
@@ -184,8 +206,12 @@ async def generate_image(
             ),
             types.Part(
                 text=(
-                    "Using the attached reference image as a compositional guide, "
-                    "generate a polished image based on the following description:\n\n"
+                    "Using the attached reference image only as a layout/composition "
+                    "guide, generate a polished image based on the following "
+                    "description. Any blue pen marks, rough sketch lines, or "
+                    "annotations in the reference are planning marks only and must "
+                    "not influence the final artistic style, rendering medium, or "
+                    "texture unless the prompt explicitly asks for a sketch look.\n\n"
                     f"{prompt}"
                 )
             ),
@@ -308,7 +334,13 @@ async def generate_image(
             logger.exception("Falling back to a data URL for generated image upload")
             url = preview_url
 
-        image_entry = {"name": file_name, "url": url}
+        image_entry = {
+            "id": uuid.uuid4().hex,
+            "label": f"Generated image {image_index}",
+            "name": file_name,
+            "url": url,
+            "source": "generated_image",
+        }
         uploaded_images.append(image_entry)
         tool_context.state["uploaded_images"] = uploaded_images
         live["uploaded_images"] = uploaded_images
