@@ -165,6 +165,8 @@ const Grainient: React.FC<GrainientProps> = ({
 
     const gl = renderer.gl;
     const canvas = gl.canvas as HTMLCanvasElement;
+    canvas.style.position = "absolute";
+    canvas.style.inset = "0";
     canvas.style.width = "100%";
     canvas.style.height = "100%";
     canvas.style.display = "block";
@@ -208,8 +210,8 @@ const Grainient: React.FC<GrainientProps> = ({
 
     const setSize = () => {
       const rect = container.getBoundingClientRect();
-      const width = Math.max(1, Math.floor(rect.width));
-      const height = Math.max(1, Math.floor(rect.height));
+      const width = Math.max(1, Math.ceil(rect.width));
+      const height = Math.max(1, Math.ceil(rect.height));
       renderer.setSize(width, height);
       const res = (program.uniforms.iResolution as { value: Float32Array })
         .value;

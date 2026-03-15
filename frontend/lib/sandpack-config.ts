@@ -124,7 +124,7 @@ export default function App() {
 
   if (!sandpackFiles["App.tsx"]) {
     sandpackFiles["App.tsx"] = `export default function App() {
-  return <div style={{ width: "100%", height: "100%", background: "#ffffff" }} />;
+  return <div style={{ width: "100%", minHeight: "100vh" }} />;
 }`;
   }
 
@@ -260,22 +260,24 @@ export function PreviewCaptureRoot({
       style={{
         position: "relative",
         width: "100%",
+        height: "100%",
         minHeight: "100vh",
         overflow: "auto",
-        background: "#ffffff",
       }}
     >
       <style>{\`
         html, body, #root {
           width: 100%;
+          height: 100%;
           min-height: 100%;
           margin: 0;
           padding: 0;
           overflow: auto;
-          background: #ffffff;
         }
       \`}</style>
-      <div style={{ width: "100%", minHeight: "100%" }}>{children}</div>
+      <div style={{ width: "100%", height: "100%", minHeight: "100%" }}>
+        {children}
+      </div>
     </div>
   );
 }`;

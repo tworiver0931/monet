@@ -118,12 +118,16 @@ export function getFrameViewportRect(
     x: bounds.x + bounds.w,
     y: bounds.y + bounds.h,
   });
+  const left = Math.floor(Math.min(topLeft.x, bottomRight.x));
+  const top = Math.floor(Math.min(topLeft.y, bottomRight.y));
+  const right = Math.ceil(Math.max(topLeft.x, bottomRight.x));
+  const bottom = Math.ceil(Math.max(topLeft.y, bottomRight.y));
 
   return {
-    x: Math.min(topLeft.x, bottomRight.x),
-    y: Math.min(topLeft.y, bottomRight.y),
-    width: Math.abs(bottomRight.x - topLeft.x),
-    height: Math.abs(bottomRight.y - topLeft.y),
+    x: left,
+    y: top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
   };
 }
 

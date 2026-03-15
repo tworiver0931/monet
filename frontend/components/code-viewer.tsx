@@ -26,7 +26,7 @@ import {
 import DeployModal from "@/components/deploy-modal";
 import Grainient from "@/components/grainient";
 import GlassSurface from "@/components/glass-surface";
-import { getExtensionForLanguage } from "@/lib/utils";
+import { cn, getExtensionForLanguage } from "@/lib/utils";
 import { Tooltip } from "@/components/ui/tooltip";
 import AmbientEdgeGlow from "@/components/ambient-edge-glow";
 import {
@@ -45,6 +45,11 @@ const FRAME_SOURCE = "sandpack-preview-capture";
 const FRAME_CONTROL_SOURCE = "sandpack-preview-control";
 const GRAINIENT_ENTER_SETTLE_MS = 260;
 const GRAINIENT_EXIT_SETTLE_MS = 760;
+const AGENT_LEGEND_TITLE = "Agent note";
+const AGENT_LEGEND_LINES = [
+  "Freehand blue strokes and arrows = user annotations.",
+  "Blue buttons, cards, and modals = app UI.",
+];
 
 type AnnotationMode = "interact" | TldrawTool;
 type GrainientPhase = "hidden" | "entering" | "active" | "exiting";
@@ -68,10 +73,16 @@ const TOOLS: {
   { mode: "eraser", icon: <Eraser size={14} />, title: "Eraser" },
 ];
 
+const BOTTOM_BAR_BUTTON_BASE_CLASS =
+  "rounded-lg border border-white/45 bg-white/55 px-2 py-1.5 text-xs font-medium text-neutral-800 shadow-[0_1px_2px_rgba(15,23,42,0.08)] backdrop-blur-md transition-all hover:bg-white/72 hover:text-neutral-900";
+
+const BOTTOM_BAR_BUTTON_ACTIVE_CLASS =
+  "border-blue-400/40 bg-blue-500 text-white shadow-[0_6px_18px_rgba(59,130,246,0.32)] hover:bg-blue-500 hover:text-white";
+
 const CodeRunner = dynamic(() => import("@/components/code-runner"), {
   ssr: false,
   loading: () => (
-    <div className="flex h-full w-full items-center justify-center bg-white" />
+    <div className="flex h-full w-full items-center justify-center bg-transparent" />
   ),
 });
 
@@ -143,6 +154,12 @@ export default function CodeViewer({
   const pendingFrameToolExitRef = useRef(false);
   const grainientEnterTimerRef = useRef<number | null>(null);
   const grainientExitTimerRef = useRef<number | null>(null);
+  const hideGrainientImmediately = useCallback(() => {
+    clearTimer(grainientEnterTimerRef);
+    clearTimer(grainientExitTimerRef);
+    setGrainientPhase("hidden");
+    setGrainientViewportRect(null);
+  }, []);
 
   const captureThumbnail = useCallback(async (): Promise<string | null> => {
     const iframe = previewIframeRef.current;
@@ -325,38 +342,6 @@ export default function CodeViewer({
     [onPreviewFailed],
   );
 
-  const previewStatusText = useMemo(() => {
-    if (!hasPendingPreviewCandidate) {
-      return null;
-    }
-
-    if (!hasCommittedPreview) {
-      if (lastFailedPreviewVersion === previewRenderVersion) {
-        return "Preview will appear when the latest draft is ready.";
-      }
-
-      return codeJobStatus === "running"
-        ? "Preparing preview..."
-        : "Finalizing preview...";
-    }
-
-    if (codeJobStatus === "running") {
-      return "Updating preview...";
-    }
-
-    if (lastFailedPreviewVersion === previewRenderVersion) {
-      return "Showing last working preview.";
-    }
-
-    return "Finalizing preview...";
-  }, [
-    codeJobStatus,
-    hasCommittedPreview,
-    hasPendingPreviewCandidate,
-    lastFailedPreviewVersion,
-    previewRenderVersion,
-  ]);
-
   const handleCursorClick = useCallback(() => {
     if (isImageGenerating) {
       setAnnotationMode("select");
@@ -436,13 +421,18 @@ export default function CodeViewer({
       return;
     }
 
-    // Compute initial rect
-    setFrameViewportRect(getFrameViewportRect(editor, generationFrameId));
+    // Keep the last good rect if tldraw briefly reports no bounds mid-drag.
+    setFrameViewportRect(
+      (current) => getFrameViewportRect(editor, generationFrameId) ?? current,
+    );
 
     // Re-compute only when the store changes (shape moved, viewport panned, etc.)
     const unsub = editor.store.listen(
       () => {
-        setFrameViewportRect(getFrameViewportRect(editor, generationFrameId));
+        setFrameViewportRect(
+          (current) =>
+            getFrameViewportRect(editor, generationFrameId) ?? current,
+        );
       },
       { scope: "document", source: "all" },
     );
@@ -468,14 +458,29 @@ export default function CodeViewer({
   useEffect(() => {
     if (isImageGenerating && frameViewportRect) {
       clearTimer(grainientExitTimerRef);
-      setGrainientPhase((current) =>
-        current === "active" ? current : "entering",
-      );
+      setGrainientPhase((current) => {
+        if (current === "active") {
+          return current;
+        }
+
+        if (current === "hidden") {
+          clearTimer(grainientEnterTimerRef);
+          grainientEnterTimerRef.current = window.setTimeout(() => {
+            setGrainientPhase("active");
+            grainientEnterTimerRef.current = null;
+          }, GRAINIENT_ENTER_SETTLE_MS);
+          return "entering";
+        }
+
+        return "active";
+      });
+      return;
+    }
+
+    if (!isImageGenerating && generatedImage && grainientViewportRect) {
       clearTimer(grainientEnterTimerRef);
-      grainientEnterTimerRef.current = window.setTimeout(() => {
-        setGrainientPhase("active");
-        grainientEnterTimerRef.current = null;
-      }, GRAINIENT_ENTER_SETTLE_MS);
+      clearTimer(grainientExitTimerRef);
+      setGrainientPhase("active");
       return;
     }
 
@@ -489,7 +494,12 @@ export default function CodeViewer({
       setGrainientViewportRect(null);
       grainientExitTimerRef.current = null;
     }, GRAINIENT_EXIT_SETTLE_MS);
-  }, [frameViewportRect, isImageGenerating]);
+  }, [
+    frameViewportRect,
+    generatedImage,
+    grainientViewportRect,
+    isImageGenerating,
+  ]);
 
   useEffect(() => {
     if (generationFrameId) {
@@ -507,6 +517,7 @@ export default function CodeViewer({
     const editor = editorRef.current;
     const frameId = generationFrameId;
     if (!editor || !frameId) {
+      hideGrainientImmediately();
       onGeneratedImageApplied?.();
       return;
     }
@@ -517,6 +528,7 @@ export default function CodeViewer({
       try {
         const frameBounds = editor.getShapePageBounds(frameId);
         if (!frameBounds) {
+          hideGrainientImmediately();
           return;
         }
 
@@ -524,6 +536,7 @@ export default function CodeViewer({
           ? `data:${generatedImage.mimeType ?? "image/png"};base64,${generatedImage.data}`
           : generatedImage.url;
         if (!imageSrc) {
+          hideGrainientImmediately();
           return;
         }
 
@@ -533,6 +546,7 @@ export default function CodeViewer({
         }
 
         const assetId = AssetRecordType.createId();
+        hideGrainientImmediately();
         editor.run(
           () => {
             removeFrameWithContents(editor, frameId);
@@ -573,6 +587,7 @@ export default function CodeViewer({
         setGenerationFrameId(null);
         setAnnotationMode("interact");
       } catch (error) {
+        hideGrainientImmediately();
         console.error("Failed to apply generated image:", error);
       } finally {
         if (!cancelled) {
@@ -587,6 +602,7 @@ export default function CodeViewer({
   }, [
     generatedImage,
     generationFrameId,
+    hideGrainientImmediately,
     isImageGenerating,
     onGeneratedImageApplied,
   ]);
@@ -697,6 +713,58 @@ export default function CodeViewer({
     [],
   );
 
+  const annotateAgentLegend = useCallback((canvas: HTMLCanvasElement) => {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+
+    const titleFontSize = Math.max(15, Math.round(canvas.width * 0.017));
+    const bodyFontSize = Math.max(12, Math.round(canvas.width * 0.013));
+    const lineGap = Math.max(6, Math.round(bodyFontSize * 0.55));
+    const paddingX = Math.max(12, Math.round(canvas.width * 0.012));
+    const paddingY = Math.max(10, Math.round(canvas.height * 0.016));
+    const margin = Math.max(14, Math.round(canvas.width * 0.014));
+
+    ctx.save();
+    ctx.font = `700 ${titleFontSize}px sans-serif`;
+    const titleWidth = ctx.measureText(AGENT_LEGEND_TITLE).width;
+    ctx.font = `600 ${bodyFontSize}px sans-serif`;
+    const bodyWidth = Math.max(
+      ...AGENT_LEGEND_LINES.map((line) => ctx.measureText(line).width),
+    );
+    const boxWidth = Math.min(
+      canvas.width - margin * 2,
+      Math.max(titleWidth, bodyWidth) + paddingX * 2,
+    );
+    const boxHeight =
+      paddingY * 2 +
+      titleFontSize +
+      lineGap +
+      AGENT_LEGEND_LINES.length * bodyFontSize +
+      (AGENT_LEGEND_LINES.length - 1) * lineGap;
+
+    ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+    ctx.fillRect(margin, margin, boxWidth, boxHeight);
+
+    ctx.strokeStyle = "rgba(236, 72, 153, 0.95)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(margin, margin, boxWidth, boxHeight);
+
+    let textY = margin + paddingY + titleFontSize;
+    ctx.font = `700 ${titleFontSize}px sans-serif`;
+    ctx.fillStyle = "#fdf2f8";
+    ctx.fillText(AGENT_LEGEND_TITLE, margin + paddingX, textY);
+
+    ctx.font = `600 ${bodyFontSize}px sans-serif`;
+    ctx.fillStyle = "#ffffff";
+    for (const line of AGENT_LEGEND_LINES) {
+      textY += lineGap + bodyFontSize;
+      ctx.fillText(line, margin + paddingX, textY);
+    }
+    ctx.restore();
+  }, []);
+
   const captureGenerationFrame = useCallback(
     (canvas: HTMLCanvasElement) => {
       const editor = editorRef.current;
@@ -762,6 +830,11 @@ export default function CodeViewer({
         const editor = editorRef.current;
         const container = tldrawContainerRef.current;
         const hasShapes = editor && editor.getCurrentPageShapeIds().size > 0;
+        const hasUserAnnotations =
+          !!editor &&
+          editor
+            .getCurrentPageShapes()
+            .some((shape) => shape.type !== "image" && shape.type !== "frame");
         const hasScribbles =
           container && container.querySelector("svg.tl-overlays__item");
 
@@ -800,6 +873,9 @@ export default function CodeViewer({
         if (hasUploadedImages) {
           const labeledCanvas = cloneCanvas(canvas);
           annotateUploadedImageLabels(labeledCanvas);
+          if (hasUserAnnotations || hasScribbles) {
+            annotateAgentLegend(labeledCanvas);
+          }
           finalCanvas = resizeCanvasToMaxDimension(
             labeledCanvas,
             MAX_PREVIEW_CAPTURE_DIM,
@@ -809,6 +885,9 @@ export default function CodeViewer({
             canvas,
             MAX_PREVIEW_CAPTURE_DIM,
           );
+          if (hasUserAnnotations || hasScribbles) {
+            annotateAgentLegend(finalCanvas);
+          }
         }
         const composited = finalCanvas
           .toDataURL("image/jpeg", 0.85)
@@ -820,7 +899,12 @@ export default function CodeViewer({
         isCompositingRef.current = false;
       }
     },
-    [annotateUploadedImageLabels, captureGenerationFrame, sendImage],
+    [
+      annotateAgentLegend,
+      annotateUploadedImageLabels,
+      captureGenerationFrame,
+      sendImage,
+    ],
   );
 
   useEffect(() => {
@@ -942,23 +1026,22 @@ export default function CodeViewer({
             blur={16}
             brightness={40}
             opacity={0.92}
-            backgroundOpacity={0.75}
+            backgroundOpacity={0.82}
             saturation={1.2}
             style={{
               boxShadow:
-                "0 4px 16px rgba(0,0,0,0.06), inset 0 0.5px 0 rgba(255,255,255,0.4)",
-              border: "1px solid rgba(0,0,0,0.06)",
+                "0 10px 30px rgba(15,23,42,0.16), inset 0 0.5px 0 rgba(255,255,255,0.45)",
+              border: "1px solid rgba(255,255,255,0.24)",
             }}
           >
             <div className="flex items-center gap-2">
               <Tooltip label={cursorTooltip}>
                 <button
                   type="button"
-                  className={`rounded-lg px-2 py-1.5 text-xs font-medium transition-colors ${
-                    isCursorActive
-                      ? "bg-blue-500 text-white shadow-sm"
-                      : "text-gray-700 hover:bg-black/10"
-                  }`}
+                  className={cn(
+                    BOTTOM_BAR_BUTTON_BASE_CLASS,
+                    isCursorActive && BOTTOM_BAR_BUTTON_ACTIVE_CLASS,
+                  )}
                   onClick={handleCursorClick}
                 >
                   <MousePointer2 size={14} />
@@ -968,13 +1051,11 @@ export default function CodeViewer({
                 <Tooltip key={mode} label={title}>
                   <button
                     type="button"
-                    className={`rounded-lg px-2 py-1.5 text-xs font-medium transition-colors ${
-                      annotationMode === mode
-                        ? "bg-blue-500 text-white shadow-sm"
-                        : "text-gray-700 hover:bg-black/10"
-                    } ${
-                      isCanvasEditLocked ? "cursor-not-allowed opacity-40" : ""
-                    }`}
+                    className={cn(
+                      BOTTOM_BAR_BUTTON_BASE_CLASS,
+                      annotationMode === mode && BOTTOM_BAR_BUTTON_ACTIVE_CLASS,
+                      isCanvasEditLocked && "cursor-not-allowed opacity-40",
+                    )}
                     onClick={() => setAnnotationMode(mode)}
                     disabled={isCanvasEditLocked}
                   >
@@ -987,11 +1068,12 @@ export default function CodeViewer({
                   type="button"
                   onClick={handleGenerationFrameClick}
                   disabled={isCanvasEditLocked}
-                  className={`rounded-lg px-2 py-1.5 text-xs font-medium transition-colors ${
-                    annotationMode === "frame"
-                      ? "bg-blue-500 text-white shadow-sm"
-                      : "text-gray-700 hover:bg-black/10"
-                  } ${isCanvasEditLocked ? "cursor-not-allowed opacity-40" : ""}`}
+                  className={cn(
+                    BOTTOM_BAR_BUTTON_BASE_CLASS,
+                    annotationMode === "frame" &&
+                      BOTTOM_BAR_BUTTON_ACTIVE_CLASS,
+                    isCanvasEditLocked && "cursor-not-allowed opacity-40",
+                  )}
                 >
                   <ImagePlus size={14} />
                 </button>
@@ -1001,9 +1083,10 @@ export default function CodeViewer({
                   type="button"
                   onClick={handleUploadClick}
                   disabled={isCanvasEditLocked}
-                  className={`rounded-lg px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-black/10 ${
-                    isCanvasEditLocked ? "cursor-not-allowed opacity-40" : ""
-                  }`}
+                  className={cn(
+                    BOTTOM_BAR_BUTTON_BASE_CLASS,
+                    isCanvasEditLocked && "cursor-not-allowed opacity-40",
+                  )}
                 >
                   <Paperclip size={14} />
                 </button>
@@ -1013,7 +1096,7 @@ export default function CodeViewer({
                   <button
                     type="button"
                     onClick={() => setShowDeployModal(true)}
-                    className="rounded-lg px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-black/10"
+                    className={BOTTOM_BAR_BUTTON_BASE_CLASS}
                   >
                     <Rocket size={14} />
                   </button>
@@ -1021,7 +1104,7 @@ export default function CodeViewer({
               )}
               {voiceControls && (
                 <>
-                  <div className="mx-1 h-6 w-px bg-gray-400/40" />
+                  <div className="mx-1 h-6 w-px bg-white/35" />
                   <div className="flex items-center gap-2">{voiceControls}</div>
                 </>
               )}
@@ -1034,7 +1117,7 @@ export default function CodeViewer({
       <div className="h-full w-full">
         <div
           ref={previewTargetRef}
-          className="relative isolate h-full w-full overflow-auto bg-white"
+          className="relative isolate h-full w-full overflow-auto bg-transparent"
         >
           <CodeRunner
             language={mainFile?.language || "tsx"}
@@ -1044,18 +1127,6 @@ export default function CodeViewer({
             showBuiltInErrorScreen={false}
             reportRuntimeErrors={false}
           />
-
-          {!hasCommittedPreview && previewStatusText ? (
-            <div className="absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-slate-500">
-              {previewStatusText}
-            </div>
-          ) : null}
-
-          {previewStatusText && hasCommittedPreview ? (
-            <div className="pointer-events-none absolute left-4 top-4 z-20 rounded-full bg-white/85 px-3 py-1 text-xs font-medium text-slate-600 shadow-sm backdrop-blur">
-              {previewStatusText}
-            </div>
-          ) : null}
         </div>
       </div>
 
@@ -1090,31 +1161,17 @@ export default function CodeViewer({
             height: grainientViewportRect.height,
             opacity:
               grainientPhase === "active"
-                ? 0.5
+                ? 1
                 : grainientPhase === "entering"
-                  ? 0.35
+                  ? 0.92
                   : grainientPhase === "exiting"
                     ? 0
                     : 0,
-            transform:
-              grainientPhase === "active"
-                ? "scale(1)"
-                : grainientPhase === "entering"
-                  ? "scale(0.985)"
-                  : grainientPhase === "exiting"
-                    ? "scale(1.015)"
-                    : "scale(1.02)",
-            filter:
-              grainientPhase === "active"
-                ? "blur(0px) saturate(1)"
-                : grainientPhase === "entering"
-                  ? "blur(8px) saturate(0.96)"
-                  : "blur(14px) saturate(0.92)",
             transition:
               grainientPhase === "exiting"
-                ? "opacity 760ms cubic-bezier(0.2, 0.7, 0.2, 1), transform 900ms cubic-bezier(0.2, 0.7, 0.2, 1), filter 900ms cubic-bezier(0.2, 0.7, 0.2, 1)"
-                : "opacity 620ms cubic-bezier(0.16, 1, 0.3, 1), transform 900ms cubic-bezier(0.16, 1, 0.3, 1), filter 900ms cubic-bezier(0.16, 1, 0.3, 1)",
-            willChange: "opacity, transform, filter",
+                ? "opacity 760ms cubic-bezier(0.2, 0.7, 0.2, 1)"
+                : "opacity 620ms cubic-bezier(0.16, 1, 0.3, 1)",
+            willChange: "opacity",
           }}
         >
           <Grainient

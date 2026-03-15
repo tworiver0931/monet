@@ -137,10 +137,20 @@ export default function TldrawOverlay({
   );
 
   return (
-    <div className="tldraw-overlay" style={{ width: "100%", height: "100%" }}>
+    <div
+      className={`tldraw-overlay ${isImageGenerationActive ? "tldraw-overlay--image-generation-active" : ""}`}
+      style={{ width: "100%", height: "100%" }}
+    >
       <style>{`
         .tldraw-overlay .tl-image-container {
           box-shadow: inset 0 0 0 2px rgba(59, 130, 246, 0.5);
+        }
+
+        .tldraw-overlay--image-generation-active .tl-frame__body,
+        .tldraw-overlay--image-generation-active .tl-frame-heading,
+        .tldraw-overlay--image-generation-active .tl-selection__fg,
+        .tldraw-overlay--image-generation-active .tl-user-handles {
+          opacity: 0;
         }
       `}</style>
       <Tldraw

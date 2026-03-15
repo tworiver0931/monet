@@ -26,7 +26,7 @@ ORCHESTRATOR_MODEL = os.getenv(
     if USE_VERTEXAI
     else "gemini-2.5-flash-native-audio-preview-12-2025",
 )
-CODE_GEN_MODEL = os.getenv("CODE_GEN_MODEL", "gemini-3-flash-preview")
+CODE_GEN_MODEL = os.getenv("CODE_GEN_MODEL", "gemini-3.1-pro-preview")
 CODE_GEN_FAST_MODEL = os.getenv("CODE_GEN_FAST_MODEL", "gemini-3.1-flash-lite-preview")
 IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "gemini-3.1-flash-image-preview")
 CODE_FAST_MODE = os.getenv("CODE_FAST_MODE", "true").lower() in ("1", "true", "yes")
