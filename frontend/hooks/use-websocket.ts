@@ -224,7 +224,7 @@ export type UseWebSocketReturn = {
     base64Data: string | null,
     mimeType?: string,
   ) => void;
-  sendImageUpload: (url: string, name: string) => void;
+  sendImageUpload: (image: UploadedImageRecord) => void;
   sendRuntimeError: (error: string) => void;
   connectionState: ConnectionState;
   codeJob: ToolJobState | null;
