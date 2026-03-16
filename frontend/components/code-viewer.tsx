@@ -2,10 +2,11 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { domToPng } from "modern-screenshot";
-import type {
-  CodeFile,
-  GeneratedImagePayload,
-  UploadedImageRecord,
+import {
+  sanitizeCodeFiles,
+  type CodeFile,
+  type GeneratedImagePayload,
+  type UploadedImageRecord,
 } from "@/lib/websocket";
 import { AssetRecordType, type Editor, type TLShapeId } from "tldraw";
 import {
@@ -26,7 +27,7 @@ import {
 import DeployModal from "@/components/deploy-modal";
 import Grainient from "@/components/grainient";
 import GlassSurface from "@/components/glass-surface";
-import { cn, getExtensionForLanguage } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { Tooltip } from "@/components/ui/tooltip";
 import AmbientEdgeGlow from "@/components/ambient-edge-glow";
 import {
@@ -53,7 +54,6 @@ const AGENT_LEGEND_LINES = [
 
 type AnnotationMode = "interact" | TldrawTool;
 type GrainientPhase = "hidden" | "entering" | "active" | "exiting";
-type PreviewJobStatus = "running" | "finished" | "cancelled" | "failed";
 type RunnerFile = { path: string; content: string };
 
 function clearTimer(timerRef: { current: number | null }) {
@@ -107,13 +107,10 @@ export default function CodeViewer({
   previewRenderVersion = 0,
   onPreviewRendered,
   onPreviewFailed,
-  codeJobStatus,
   voiceControls,
   sessionId,
 }: {
   files: CodeFile[];
-  activeTab: string;
-  onTabChange: (v: "code" | "preview") => void;
   onClose: () => void;
   sendImage?: (base64Data: string, mimeType?: string) => void;
   sendImageGenerationFrame?: (
@@ -132,14 +129,11 @@ export default function CodeViewer({
   previewRenderVersion?: number;
   onPreviewRendered?: (renderVersion: number) => void;
   onPreviewFailed?: (renderVersion: number) => void;
-  codeJobStatus?: PreviewJobStatus | null;
   voiceControls?: React.ReactNode;
   sessionId?: string;
 }) {
   const [annotationMode, setAnnotationMode] =
     useState<AnnotationMode>("interact");
-  const [, setCaptureError] = useState<string | null>(null);
-  const [, setIsPreviewReady] = useState(false);
   const [showDeployModal, setShowDeployModal] = useState(false);
   const [generationFrameId, setGenerationFrameId] = useState<TLShapeId | null>(
     null,
@@ -206,29 +200,7 @@ export default function CodeViewer({
     return { ...image, url };
   }, []);
 
-  const safeFiles = useMemo(
-    () =>
-      files.map((file, index) => {
-        const rawPath = typeof file.path === "string" ? file.path.trim() : "";
-        const language =
-          typeof file.language === "string" && file.language.trim().length > 0
-            ? file.language
-            : "tsx";
-
-        return {
-          ...file,
-          language,
-          path:
-            rawPath ||
-            `generated/file-${index + 1}.${getExtensionForLanguage(language)}`,
-        };
-      }),
-    [files],
-  );
-  const mainFile =
-    safeFiles.find((f) => f.path.endsWith("App.tsx")) ||
-    safeFiles.find((f) => f.path.endsWith(".tsx")) ||
-    safeFiles[0];
+  const safeFiles = useMemo(() => sanitizeCodeFiles(files), [files]);
   const runnerFiles = useMemo<RunnerFile[]>(
     () =>
       safeFiles.map((file) => ({
@@ -247,10 +219,7 @@ export default function CodeViewer({
     RunnerFile[]
   >([]);
   const [committedPreviewVersion, setCommittedPreviewVersion] = useState(0);
-  const [lastFailedPreviewVersion, setLastFailedPreviewVersion] = useState<
-    number | null
-  >(null);
-  const hasCommittedPreview = committedRunnerFiles.length > 0;
+  const [, setLastFailedPreviewVersion] = useState<number | null>(null);
   const hasPendingPreviewCandidate =
     runnerFiles.length > 0 && previewRenderVersion > committedPreviewVersion;
 
@@ -614,7 +583,6 @@ export default function CodeViewer({
       previewIframeRef.current !== iframe
     ) {
       previewIframeRef.current = iframe;
-      setIsPreviewReady(false);
       iframe.contentWindow?.postMessage(
         {
           source: FRAME_CONTROL_SOURCE,
@@ -924,8 +892,6 @@ export default function CodeViewer({
       }
 
       if (payload.type === "ready") {
-        setIsPreviewReady(true);
-        setCaptureError(null);
         return;
       }
 
@@ -943,11 +909,6 @@ export default function CodeViewer({
       }
 
       if (payload.type === "capture-error") {
-        setCaptureError(
-          typeof payload.message === "string"
-            ? payload.message
-            : "Preview capture failed.",
-        );
         reportRenderedVersion(payload.renderVersion);
       }
     };
@@ -1032,9 +993,9 @@ export default function CodeViewer({
             }`}
           >
             <GlassSurface
-              width={344}
-              height={65}
-              borderRadius={999}
+              width={280}
+              height={56}
+              borderRadius={20}
               blur={16}
               brightness={40}
               opacity={0.92}
@@ -1128,7 +1089,6 @@ export default function CodeViewer({
           className="relative isolate h-full w-full overflow-auto bg-transparent"
         >
           <CodeRunner
-            language={mainFile?.language || "tsx"}
             files={committedRunnerFiles}
             previewRenderVersion={committedPreviewVersion}
             captureMode="settled"
@@ -1144,7 +1104,6 @@ export default function CodeViewer({
           className="pointer-events-none absolute -left-[200vw] top-0 h-px w-px overflow-hidden opacity-0"
         >
           <CodeRunner
-            language={mainFile?.language || "tsx"}
             files={runnerFiles}
             previewRenderVersion={previewRenderVersion}
             onPreviewRendered={handleStagedPreviewRendered}

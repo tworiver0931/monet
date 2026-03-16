@@ -34,9 +34,13 @@ export default function AmbientEdgeGlow({
   }, []);
 
   useEffect(() => {
+    let frameId: number | null = null;
+
     if (isActive) {
       clearTimer(exitTimerRef);
-      setPhase((current) => (current === "active" ? current : "entering"));
+      frameId = window.requestAnimationFrame(() => {
+        setPhase((current) => (current === "active" ? current : "entering"));
+      });
       clearTimer(enterTimerRef);
       enterTimerRef.current = window.setTimeout(() => {
         setPhase("active");
@@ -46,12 +50,20 @@ export default function AmbientEdgeGlow({
     }
 
     clearTimer(enterTimerRef);
-    setPhase((current) => (current === "hidden" ? current : "exiting"));
+    frameId = window.requestAnimationFrame(() => {
+      setPhase((current) => (current === "hidden" ? current : "exiting"));
+    });
     clearTimer(exitTimerRef);
     exitTimerRef.current = window.setTimeout(() => {
       setPhase("hidden");
       exitTimerRef.current = null;
     }, GLOW_EXIT_SETTLE_MS);
+
+    return () => {
+      if (frameId !== null) {
+        window.cancelAnimationFrame(frameId);
+      }
+    };
   }, [isActive]);
 
   const containerStyle =

@@ -11,22 +11,6 @@ annotations. Blue UI inside the preview, such as buttons, cards, borders,
 modals, and highlighted components, is part of the app unless it is clearly
 drawn on top.
 
-## Request Context
-
-Each code-generation request can include structured sections such as:
-
-- `Approved Plan`
-- `Latest User Turn`
-- `Follow-Up Delta`
-- `Requested Changes`
-- `Recent Conversation Memory`
-- `Recent Code Changes`
-- `Visual Context`
-
-Use `Approved Plan` as the main source of truth for what to build right now.
-Use `Recent Conversation Memory` and `Recent Code Changes` to preserve intent
-across follow-up edits instead of reinterpreting the app from scratch.
-
 {{HOW_YOU_WORK_SECTION}}
 
 ## Rules

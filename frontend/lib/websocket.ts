@@ -87,7 +87,7 @@ function inferLanguageFromPath(path: string): string {
   return languages[extension || ""] || "text";
 }
 
-function sanitizeCodeFiles(input: unknown): CodeFile[] {
+export function sanitizeCodeFiles(input: unknown): CodeFile[] {
   if (!Array.isArray(input)) return [];
 
   return input
@@ -130,7 +130,6 @@ export type WSEventHandlers = {
   onToolCancelled?: (payload: ToolLifecyclePayload) => void;
   onToolFailed?: (payload: ToolLifecyclePayload) => void;
   onGeneratedImage?: (image: GeneratedImagePayload) => void;
-  onTurnComplete?: () => void;
   onInterrupted?: () => void;
   onSessionTimeout?: (reason: "idle" | "hard_limit") => void;
   onBackendError?: (message: string) => void;
@@ -278,12 +277,6 @@ export class MonetWebSocket {
         );
         return;
     }
-
-    // ADK Event fields are at the top level (not nested under serverContent)
-    if (msg.turnComplete) {
-      this.handlers.onTurnComplete?.();
-    }
-
     if (msg.interrupted) {
       this.handlers.onInterrupted?.();
     }
@@ -355,17 +348,6 @@ export class MonetWebSocket {
   sendImageUpload(image: UploadedImageRecord): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: "image_upload", image }));
-    }
-  }
-
-  sendRuntimeError(error: string): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(
-        JSON.stringify({
-          type: "runtime_error",
-          error,
-        }),
-      );
     }
   }
 

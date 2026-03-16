@@ -17,6 +17,7 @@ import json
 import logging
 import time
 import uuid
+import itertools
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import AsyncGenerator, Awaitable, Callable, Literal
@@ -32,7 +33,12 @@ from google import genai
 
 from ...config import CODE_FAST_MODE, CODE_GEN_FAST_MODEL, CODE_GEN_LOCATION, CODE_GEN_MODEL, GOOGLE_CLOUD_PROJECT
 from ...prompts import get_code_agent_fast_instruction, get_code_agent_instruction
-from ...utils import apply_file_actions, format_files_as_code_blocks, lang_from_path
+from ...utils import (
+    apply_file_actions,
+    format_files_as_code_blocks,
+    lang_from_path,
+    normalize_uploaded_image_record,
+)
 from .tools import delete_file, edit_file, list_files, read_file, write_file
 
 logger = logging.getLogger(__name__)
@@ -44,9 +50,6 @@ POLL_INTERVAL_SECONDS = 0.05
 HEARTBEAT_INTERVAL_SECONDS = 4.0
 FAST_GENERATE_TIMEOUT_SECONDS = 120
 MAX_HISTORY_MESSAGES = 20
-MAX_CONTEXT_MEMORY_ENTRIES = 12
-MAX_CONTEXT_CODE_RUNS = 4
-MAX_STORED_CODE_RUNS = 8
 
 
 @dataclass(slots=True)
@@ -96,59 +99,7 @@ class CodeResponse(BaseModel):
     )
 
 
-class GenerateCodeRequest(BaseModel):
-    """Structured request payload passed from the orchestrator."""
-
-    approved_plan: str = Field(
-        description="The approved implementation plan for this code run.",
-    )
-    latest_user_turn: str = Field(
-        default="",
-        description="The latest user message that triggered this approved plan.",
-    )
-    requested_changes: list[str] = Field(
-        default_factory=list,
-        description="Concrete changes to make during this run.",
-    )
-    referenced_images: list[str] = Field(
-        default_factory=list,
-        description="Uploaded image labels or references relevant to this request.",
-    )
-    follow_up_delta: str = Field(
-        default="",
-        description="How this request differs from the previously approved plan.",
-    )
-
-
-class ConversationMemoryEntry(BaseModel):
-    """Normalized conversation-memory entry stored in live/session state."""
-
-    kind: str = Field(description="Entry type such as user_turn or runtime_error.")
-    text: str = Field(default="", description="Primary text content for the entry.")
-    source: str = Field(default="", description="Origin such as text, speech, or assistant.")
-    turn_id: int | None = Field(default=None, description="Associated user turn id when available.")
-    meta: dict[str, object] = Field(
-        default_factory=dict,
-        description="Extra structured metadata associated with the entry.",
-    )
-
-
-class RecentCodeRun(BaseModel):
-    """Compact durable summary of a previous code-agent run."""
-
-    summary: str = Field(description="Natural-language summary of the completed run.")
-    changed_paths: list[str] = Field(
-        default_factory=list,
-        description="Paths created, edited, or deleted during the run.",
-    )
-    approved_plan: str = Field(
-        default="",
-        description="Approved plan that led to the run.",
-    )
-    follow_up_delta: str = Field(
-        default="",
-        description="Follow-up delta associated with this run, if any.",
-    )
+CODE_RESPONSE_JSON_SCHEMA = CodeResponse.model_json_schema()
 
 
 # ---------------------------------------------------------------------------
@@ -178,46 +129,15 @@ def _append_uploaded_images(base: str, images: list) -> str:
     )
 
 
-def _normalize_uploaded_image_record(img: object, index: int) -> dict[str, str] | None:
-    """Normalize uploaded image metadata for prompt assembly."""
-    if isinstance(img, dict):
-        url = img.get("url", "")
-        if not isinstance(url, str) or not url:
-            return None
-        name = img.get("name", "uploaded_image")
-        if not isinstance(name, str) or not name:
-            name = "uploaded_image"
-        label = img.get("label", f"Image {index}")
-        if not isinstance(label, str) or not label:
-            label = f"Image {index}"
-        image_id = img.get("id", "")
-        if not isinstance(image_id, str):
-            image_id = ""
-        source = img.get("source", "user_upload")
-        if not isinstance(source, str) or not source:
-            source = "user_upload"
-        return {
-            "id": image_id,
-            "label": label,
-            "name": name,
-            "url": url,
-            "source": source,
-        }
-    if isinstance(img, str) and img:
-        return {
-            "id": "",
-            "label": f"Image {index}",
-            "name": f"uploaded-image-{index}",
-            "url": img,
-            "source": "user_upload",
-        }
-    return None
-
-
 def _normalize_uploaded_images(images: list) -> list[dict[str, str]]:
     normalized: list[dict[str, str]] = []
     for index, img in enumerate(images, start=1):
-        record = _normalize_uploaded_image_record(img, index)
+        record = normalize_uploaded_image_record(
+            img,
+            default_name="uploaded-image",
+            index_hint=index,
+            source="user_upload",
+        )
         if record is not None:
             normalized.append(record)
     return normalized
@@ -244,296 +164,30 @@ def _format_uploaded_images_block(images: list) -> str:
     return "\n".join(lines)
 
 
-def _clean_text(value: object) -> str:
-    """Normalize arbitrary values into a stripped string."""
-    if isinstance(value, str):
-        return value.strip()
-    return ""
-
-
-def _clean_string_list(values: object) -> list[str]:
-    """Normalize arbitrary list-like values into stripped strings."""
-    if not isinstance(values, list):
-        return []
-    cleaned: list[str] = []
-    for value in values:
-        text = _clean_text(value)
-        if text:
-            cleaned.append(text)
-    return cleaned
-
-
-def _infer_referenced_images(
-    *,
-    uploaded_images: list,
-    request: GenerateCodeRequest,
-) -> list[str]:
-    """Infer referenced image labels from the current request text."""
-    available_labels = [
-        image["label"]
-        for image in _normalize_uploaded_images(uploaded_images)
-        if image.get("label")
-    ]
-    haystack_parts = [
-        request.approved_plan,
-        request.latest_user_turn,
-        request.follow_up_delta,
-        *request.requested_changes,
-    ]
-    haystack = " ".join(part.lower() for part in haystack_parts if part).strip()
-    if not haystack:
-        return []
-
-    return [label for label in available_labels if label.lower() in haystack]
-
-
-def _normalize_generate_code_request(
-    *,
-    approved_plan: str,
-    requested_changes: list[str] | None = None,
-    follow_up_delta: str = "",
-    live: dict | None = None,
-    kwargs: dict | None = None,
-) -> GenerateCodeRequest:
-    """Create a validated request model from tool-call arguments."""
-    fallback_prompt = ""
-    if isinstance(kwargs, dict):
-        fallback_prompt = _clean_text(kwargs.get("prompt"))
-    latest_user_turn = ""
-    if isinstance(live, dict):
-        latest_user_turn = _clean_text(live.get("latest_user_turn_text"))
-
-    request = GenerateCodeRequest(
-        approved_plan=_clean_text(approved_plan) or fallback_prompt,
-        latest_user_turn=latest_user_turn,
-        requested_changes=_clean_string_list(requested_changes),
-        referenced_images=[],
-        follow_up_delta=_clean_text(follow_up_delta),
-    )
-    if not request.approved_plan:
-        raise ValueError("generate_code requires a non-empty approved_plan.")
-
-    request.referenced_images = _infer_referenced_images(
-        uploaded_images=live.get("uploaded_images", []) if isinstance(live, dict) else [],
-        request=request,
-    )
-    return request
-
-
-def _normalize_conversation_memory(
-    entries: object,
-) -> list[ConversationMemoryEntry]:
-    """Normalize session conversation-memory entries."""
-    if not isinstance(entries, list):
-        return []
-
-    normalized: list[ConversationMemoryEntry] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        try:
-            normalized.append(ConversationMemoryEntry.model_validate(entry))
-        except Exception:
-            logger.debug("Skipping invalid conversation memory entry", exc_info=True)
-    return normalized
-
-
-def _normalize_recent_code_runs(entries: object) -> list[RecentCodeRun]:
-    """Normalize durable recent code-run summaries."""
-    if not isinstance(entries, list):
-        return []
-
-    normalized: list[RecentCodeRun] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        try:
-            normalized.append(RecentCodeRun.model_validate(entry))
-        except Exception:
-            logger.debug("Skipping invalid recent code run entry", exc_info=True)
-    return normalized
-
-
-def _format_list_section(title: str, items: list[str]) -> str:
-    """Render a markdown section from a list of strings."""
-    if not items:
-        return ""
-    body = "\n".join(f"- {item}" for item in items)
-    return f"## {title}\n\n{body}"
-
-
-def _format_memory_entry(entry: ConversationMemoryEntry) -> str:
-    """Render a compact human-readable conversation-memory line."""
-    source_prefix = f"[{entry.source}] " if entry.source else ""
-    text = entry.text or "(no text)"
-    return f"- {entry.kind}: {source_prefix}{text}"
-
-
-def _format_recent_code_run(entry: RecentCodeRun) -> str:
-    """Render a compact recent-code-run summary line."""
-    changed_paths = ", ".join(f"`{path}`" for path in entry.changed_paths[:6])
-    suffix = f" Changed files: {changed_paths}." if changed_paths else ""
-    return f"- {entry.summary}{suffix}"
-
-
-def _build_visual_context_section(
-    *,
-    request: GenerateCodeRequest,
-    latest_frame: bytes | None,
-) -> str:
-    """Describe non-code context available to the model for this run."""
-    lines: list[str] = []
-    if latest_frame:
-        lines.append("- A screenshot of the current app preview is attached.")
-    if request.referenced_images:
-        labels = ", ".join(f"`{label}`" for label in request.referenced_images)
-        lines.append(f"- The request explicitly references uploaded images: {labels}.")
-    if not lines:
-        lines.append("- No screenshot was attached for this turn.")
-    return "## Visual Context\n\n" + "\n".join(lines)
-
-
 def _build_generate_code_prompt_text(
     *,
-    request: GenerateCodeRequest,
-    conversation_memory: list[dict],
-    recent_code_runs: list[dict],
-    latest_frame: bytes | None,
+    prompt: str,
+    transcript_entries: list[str],
+    latest_user_turn_text: str,
+    uploaded_images: list,
 ) -> str:
-    """Build the shared per-call context payload for both execution modes."""
-    sections = ["## Approved Plan\n\n" + request.approved_plan]
+    """Build the per-call user prompt with explicit request priority."""
+    sections = []
+    uploaded_images_block = _format_uploaded_images_block(uploaded_images)
+    if uploaded_images_block:
+        sections.append(uploaded_images_block)
 
-    if request.latest_user_turn:
-        sections.append("## Latest User Turn\n\n" + request.latest_user_turn)
+    sections.append("## Latest Approved Request\n\n" + prompt)
 
-    if request.follow_up_delta:
-        sections.append("## Follow-Up Delta\n\n" + request.follow_up_delta)
+    latest_turn = latest_user_turn_text.strip()
+    if latest_turn:
+        sections.append("## Latest User Turn\n\n" + latest_turn)
 
-    requested_changes_section = _format_list_section(
-        "Requested Changes",
-        request.requested_changes,
-    )
-    if requested_changes_section:
-        sections.append(requested_changes_section)
+    recent_entries = transcript_entries[-12:]
+    if recent_entries:
+        sections.append("## Recent Conversation Context\n\n" + "\n".join(recent_entries))
 
-    recent_memory = _normalize_conversation_memory(conversation_memory)[-MAX_CONTEXT_MEMORY_ENTRIES:]
-    if recent_memory:
-        memory_body = "\n".join(_format_memory_entry(entry) for entry in recent_memory)
-        sections.append("## Recent Conversation Memory\n\n" + memory_body)
-
-    previous_runs = _normalize_recent_code_runs(recent_code_runs)[-MAX_CONTEXT_CODE_RUNS:]
-    if previous_runs:
-        run_body = "\n".join(_format_recent_code_run(entry) for entry in previous_runs)
-        sections.append("## Recent Code Changes\n\n" + run_body)
-
-    sections.append(
-        _build_visual_context_section(
-            request=request,
-            latest_frame=latest_frame,
-        )
-    )
     return "\n\n".join(sections)
-
-
-def _compute_changed_paths(
-    previous_files: list[dict],
-    updated_files: list[dict],
-) -> list[str]:
-    """Return created, modified, or deleted paths between two file lists."""
-    previous_by_path = {
-        path: code
-        for path, code in (
-            (entry.get("path"), entry.get("code"))
-            for entry in previous_files
-            if isinstance(entry, dict)
-        )
-        if isinstance(path, str)
-    }
-    updated_by_path = {
-        path: code
-        for path, code in (
-            (entry.get("path"), entry.get("code"))
-            for entry in updated_files
-            if isinstance(entry, dict)
-        )
-        if isinstance(path, str)
-    }
-
-    changed: list[str] = []
-    all_paths = sorted(set(previous_by_path) | set(updated_by_path))
-    for path in all_paths:
-        if previous_by_path.get(path) != updated_by_path.get(path):
-            changed.append(path)
-    return changed
-
-
-def _append_live_conversation_entry(
-    live: dict,
-    *,
-    kind: str,
-    text: str,
-    source: str,
-    turn_id: int | None = None,
-    meta: dict[str, object] | None = None,
-) -> None:
-    """Append a bounded normalized memory entry to live/session state."""
-    entries = live.setdefault("conversation_memory", [])
-    if not isinstance(entries, list):
-        entries = []
-        live["conversation_memory"] = entries
-
-    payload = ConversationMemoryEntry(
-        kind=kind,
-        text=text,
-        source=source,
-        turn_id=turn_id,
-        meta=meta or {},
-    ).model_dump()
-    entries.append(payload)
-    if len(entries) > 100:
-        del entries[:-100]
-
-    session_state = live.get("session_state")
-    if isinstance(session_state, dict):
-        session_state["conversation_memory"] = entries
-
-
-def _record_recent_code_run(
-    live: dict,
-    *,
-    request: GenerateCodeRequest,
-    summary: str,
-    previous_files: list[dict],
-    updated_files: list[dict],
-) -> None:
-    """Persist a compact summary of the latest code-agent run."""
-    changed_paths = _compute_changed_paths(previous_files, updated_files)
-    entry = RecentCodeRun(
-        summary=summary,
-        changed_paths=changed_paths,
-        approved_plan=request.approved_plan,
-        follow_up_delta=request.follow_up_delta,
-    ).model_dump()
-
-    runs = live.setdefault("recent_code_runs", [])
-    if not isinstance(runs, list):
-        runs = []
-        live["recent_code_runs"] = runs
-    runs.append(entry)
-    if len(runs) > MAX_STORED_CODE_RUNS:
-        del runs[:-MAX_STORED_CODE_RUNS]
-
-    session_state = live.get("session_state")
-    if isinstance(session_state, dict):
-        session_state["recent_code_runs"] = runs
-
-    _append_live_conversation_entry(
-        live,
-        kind="code_run",
-        text=summary,
-        source="generate_code",
-        meta={"changed_paths": changed_paths},
-    )
 
 
 _code_agent_tools = [
@@ -764,7 +418,7 @@ def build_tool_turn_gate_error(
         return (
             f"[ToolError] {tool_name}: There is no completed real user turn "
             "available yet. Do not call any tools right now. If the session just "
-            "started, say exactly: Hello! What would you like to build today? "
+            "started, say: Hello! What would you like to build today? "
             "Otherwise keep listening and wait until the user's request or "
             "approval is fully received before trying again."
         )
@@ -1026,7 +680,7 @@ async def _fast_generate(
                         system_instruction=instruction,
                         thinking_config=types.ThinkingConfig(thinking_level="medium"),
                         response_mime_type="application/json",
-                        response_json_schema=CodeResponse.model_json_schema(),
+                        response_json_schema=CODE_RESPONSE_JSON_SCHEMA,
                     ),
                 )
             break
@@ -1099,21 +753,19 @@ async def _fast_generate(
 
 
 async def generate_code(
-    approved_plan: str,
-    tool_context: ToolContext,
-    requested_changes: list[str] | None = None,
-    follow_up_delta: str = "",
-    **kwargs,
+    prompt: str, tool_context: ToolContext, **kwargs
 ) -> AsyncGenerator[str, None]:
     """Generates or refines a React application.
 
     Args:
-        approved_plan: the approved implementation plan for this run.
+        prompt: description of what to build or change.
 
     Returns:
         A brief summary what was done
     """
+    del kwargs
     fast_mode = CODE_FAST_MODE
+    model = CODE_GEN_FAST_MODEL if fast_mode else CODE_GEN_MODEL
     tool_name = "generate_code"
     orchestrator_session_id = tool_context.session.id
     job_id = get_tool_job_id(tool_context, tool_name)
@@ -1177,41 +829,25 @@ async def generate_code(
 
         # Read live state from module-level registry
         live = get_live_state(orchestrator_session_id)
-        request = _normalize_generate_code_request(
-            approved_plan=approved_plan,
-            requested_changes=requested_changes,
-            follow_up_delta=follow_up_delta,
-            live=live,
-            kwargs=kwargs,
-        )
         code_files = live.get("code_files", [])
         uploaded_images = live.get("uploaded_images", [])
-        conversation_memory = live.get("conversation_memory", [])
-        recent_code_runs = live.get("recent_code_runs", [])
+        transcript = live.get("transcript", [])
         latest_frame = live.get("latest_frame")
         latest_mime = live.get("latest_frame_mime", "image/jpeg")
-        previous_files = list(code_files)
-
-        _append_live_conversation_entry(
-            live,
-            kind="approved_plan",
-            text=request.approved_plan,
-            source="orchestrator",
-            turn_id=turn_id,
-            meta={
-                "requested_changes": request.requested_changes,
-                "referenced_images": request.referenced_images,
-                "follow_up_delta": request.follow_up_delta,
-            },
-        )
+        latest_user_turn_text = live.get("latest_user_turn_text", "")
+        if not isinstance(latest_user_turn_text, str):
+            latest_user_turn_text = ""
 
         if fast_mode:
             # ----- Fast mode: single LLM call, structured JSON output -----
+            offset = live.get("_fast_transcript_offset", 0)
+            new_entries = list(itertools.islice(transcript, offset, None))
+            live["_fast_transcript_offset"] = len(transcript)
             prompt_text = _build_generate_code_prompt_text(
-                request=request,
-                conversation_memory=conversation_memory,
-                recent_code_runs=recent_code_runs,
-                latest_frame=latest_frame,
+                prompt=prompt,
+                transcript_entries=new_entries,
+                latest_user_turn_text=latest_user_turn_text,
+                uploaded_images=uploaded_images,
             )
 
             generate_task = asyncio.create_task(
@@ -1254,18 +890,8 @@ async def generate_code(
 
             tool_context.state["code_files"] = updated_files
             live["code_files"] = updated_files
-            session_state = live.get("session_state")
-            if isinstance(session_state, dict):
-                session_state["code_files"] = updated_files
 
             final_summary = summary or "Code generation complete."
-            _record_recent_code_run(
-                live,
-                request=request,
-                summary=final_summary,
-                previous_files=previous_files,
-                updated_files=updated_files,
-            )
             await emit_tool_event(
                 orchestrator_session_id,
                 event_type="tool_result",
@@ -1313,17 +939,29 @@ async def generate_code(
                 state={
                     "code_files": code_files,
                     "uploaded_images": uploaded_images,
+                    "_transcript_offset": 0,
                 },
             )
         else:
             session.state["code_files"] = code_files
             session.state["uploaded_images"] = uploaded_images
 
+        offset = session.state.get("_transcript_offset", 0)
+        new_entries = list(itertools.islice(transcript, offset, None))
+        session.state["_transcript_offset"] = len(transcript)
+        logger.info(
+            "Transcript debug: session=%s, total=%d, offset=%d, new_entries=%d",
+            orchestrator_session_id,
+            len(transcript),
+            offset,
+            len(new_entries),
+        )
+
         prompt_text = _build_generate_code_prompt_text(
-            request=request,
-            conversation_memory=conversation_memory,
-            recent_code_runs=recent_code_runs,
-            latest_frame=latest_frame,
+            prompt=prompt,
+            transcript_entries=new_entries,
+            latest_user_turn_text=latest_user_turn_text,
+            uploaded_images=uploaded_images,
         )
 
         msg_parts = [types.Part(text=prompt_text)]
@@ -1362,9 +1000,6 @@ async def generate_code(
                 if new_files is not None:
                     tool_context.state["code_files"] = new_files
                     live["code_files"] = new_files
-                    session_state = live.get("session_state")
-                    if isinstance(session_state, dict):
-                        session_state["code_files"] = new_files
                     await emit_tool_event(
                         orchestrator_session_id,
                         event_type="tool_result",
@@ -1391,13 +1026,6 @@ async def generate_code(
             return
 
         final_summary = summary or "Code generation complete."
-        _record_recent_code_run(
-            live,
-            request=request,
-            summary=final_summary,
-            previous_files=previous_files,
-            updated_files=live.get("code_files", previous_files),
-        )
         await emit_tool_event(
             orchestrator_session_id,
             event_type="tool_finished",

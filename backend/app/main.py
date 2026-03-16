@@ -7,10 +7,6 @@ import secrets
 import time
 import uuid
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -36,191 +32,19 @@ from .agents.code.agent import (
     unregister_live_state,
 )
 from .storage import upload_public_blob
+from .utils import normalize_uploaded_image_record
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MAX_FRAME_BYTES = 5 * 1024 * 1024  # 5 MB limit for stored frames
 LIVE_SESSION_TIMEOUT = 600  # 10 min max per live session connection
-MAX_CONVERSATION_MEMORY = 100
-MAX_RECENT_CODE_RUNS = 8
 
 WS_CLOSE_IDLE_TIMEOUT = 4000
 WS_CLOSE_HARD_LIMIT = 4001
 
 _session_connections_lock = asyncio.Lock()
 _active_session_connections: dict[str, tuple[str, WebSocket]] = {}
-_APPROVAL_PHRASES = (
-    "yes",
-    "yeah",
-    "yep",
-    "sure",
-    "go ahead",
-    "do it",
-    "sounds good",
-    "okay",
-    "ok",
-    "make it",
-)
-
-
-def _normalize_uploaded_image_record(
-    payload: object,
-    *,
-    default_name: str = "uploaded_image",
-    index_hint: int | None = None,
-    source: str = "user_upload",
-) -> dict[str, str] | None:
-    """Return a normalized uploaded-image record or ``None``."""
-    if not isinstance(payload, dict):
-        return None
-
-    url = payload.get("url", "")
-    if not isinstance(url, str) or not url:
-        return None
-
-    name = payload.get("name", default_name)
-    if not isinstance(name, str) or not name:
-        name = default_name
-
-    label = payload.get("label", "")
-    if not isinstance(label, str) or not label:
-        next_index = index_hint or 1
-        label = f"Image {next_index}"
-
-    image_id = payload.get("id", "")
-    if not isinstance(image_id, str) or not image_id:
-        image_id = uuid.uuid4().hex
-
-    image_source = payload.get("source", source)
-    if not isinstance(image_source, str) or not image_source:
-        image_source = source
-
-    return {
-        "id": image_id,
-        "label": label,
-        "name": name,
-        "url": url,
-        "source": image_source,
-    }
-
-
-def _clean_text(value: object) -> str:
-    """Normalize arbitrary values into a stripped string."""
-    if isinstance(value, str):
-        return value.strip()
-    return ""
-
-
-def _normalize_meta(value: object) -> dict[str, object]:
-    """Return a shallow normalized metadata dict."""
-    if not isinstance(value, dict):
-        return {}
-    normalized: dict[str, object] = {}
-    for key, item in value.items():
-        if isinstance(key, str):
-            normalized[key] = item
-    return normalized
-
-
-def _normalize_memory_entry(entry: object) -> dict[str, object] | None:
-    """Normalize a conversation-memory entry."""
-    if not isinstance(entry, dict):
-        return None
-
-    kind = _clean_text(entry.get("kind"))
-    if not kind:
-        return None
-
-    normalized: dict[str, object] = {
-        "kind": kind,
-        "text": _clean_text(entry.get("text")),
-        "source": _clean_text(entry.get("source")),
-        "meta": _normalize_meta(entry.get("meta")),
-    }
-    turn_id = entry.get("turn_id")
-    if isinstance(turn_id, int):
-        normalized["turn_id"] = turn_id
-    return normalized
-
-
-def _normalize_conversation_memory(entries: object) -> list[dict[str, object]]:
-    """Normalize stored conversation memory."""
-    if not isinstance(entries, list):
-        return []
-    normalized = [
-        entry
-        for entry in (_normalize_memory_entry(item) for item in entries)
-        if entry is not None
-    ]
-    return normalized[-MAX_CONVERSATION_MEMORY:]
-
-
-def _normalize_recent_code_runs(entries: object) -> list[dict[str, object]]:
-    """Normalize stored recent code-run summaries."""
-    if not isinstance(entries, list):
-        return []
-
-    normalized: list[dict[str, object]] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        summary = _clean_text(entry.get("summary"))
-        if not summary:
-            continue
-        changed_paths = entry.get("changed_paths")
-        if not isinstance(changed_paths, list):
-            changed_paths = []
-        normalized.append(
-            {
-                "summary": summary,
-                "changed_paths": [path for path in changed_paths if isinstance(path, str)],
-                "approved_plan": _clean_text(entry.get("approved_plan")),
-                "follow_up_delta": _clean_text(entry.get("follow_up_delta")),
-            }
-        )
-    return normalized[-MAX_RECENT_CODE_RUNS:]
-
-
-def _append_memory_entry(
-    entries: list[dict[str, object]],
-    *,
-    kind: str,
-    text: str,
-    source: str,
-    turn_id: int | None = None,
-    meta: dict[str, object] | None = None,
-) -> None:
-    """Append a bounded memory entry in-place."""
-    entry: dict[str, object] = {
-        "kind": kind,
-        "text": text.strip(),
-        "source": source,
-        "meta": meta or {},
-    }
-    if turn_id is not None:
-        entry["turn_id"] = turn_id
-    entries.append(entry)
-    if len(entries) > MAX_CONVERSATION_MEMORY:
-        del entries[:-MAX_CONVERSATION_MEMORY]
-
-
-def _looks_like_explicit_approval(text: str) -> bool:
-    """Heuristic check for short explicit approval replies."""
-    normalized = text.strip().lower()
-    if not normalized:
-        return False
-    return any(phrase in normalized for phrase in _APPROVAL_PHRASES)
-
-
-def _latest_user_memory_entry(
-    entries: list[dict[str, object]],
-) -> dict[str, object] | None:
-    """Return the most recent stored user-turn memory entry."""
-    for entry in reversed(entries):
-        if entry.get("kind") == "user_turn":
-            return entry
-    return None
 
 
 def _is_session_owner(session_id: str, connection_id: str) -> bool:
@@ -391,16 +215,6 @@ async def upstream_task(
                         session_id,
                         error_msg[:200],
                     )
-                    live = _live_state_registry.get(session_id)
-                    if live is not None:
-                        memory = live.get("conversation_memory", [])
-                        if isinstance(memory, list):
-                            _append_memory_entry(
-                                memory,
-                                kind="runtime_error",
-                                text=error_msg,
-                                source="preview",
-                            )
                     content = types.Content(
                         role="user",
                         parts=[types.Part(text=(
@@ -417,30 +231,11 @@ async def upstream_task(
                 elif msg_type == "text":
                     text_content = msg.get("text", "")
                     if text_content:
-                        turn_id = await record_user_turn(
+                        await record_user_turn(
                             session_id,
                             source="text",
                             text=text_content,
                         )
-                        live = _live_state_registry.get(session_id)
-                        if live is not None:
-                            memory = live.get("conversation_memory", [])
-                            if isinstance(memory, list):
-                                _append_memory_entry(
-                                    memory,
-                                    kind="user_turn",
-                                    text=text_content,
-                                    source="text",
-                                    turn_id=turn_id,
-                                )
-                                if _looks_like_explicit_approval(text_content):
-                                    _append_memory_entry(
-                                        memory,
-                                        kind="approval",
-                                        text=text_content,
-                                        source="text",
-                                        turn_id=turn_id,
-                                    )
                         content = types.Content(
                             role="user",
                             parts=[types.Part(text=text_content)],
@@ -494,7 +289,7 @@ async def upstream_task(
                     live = _live_state_registry.get(session_id)
                     if live is not None:
                         images = live.get("uploaded_images", [])
-                        image = _normalize_uploaded_image_record(
+                        image = normalize_uploaded_image_record(
                             image_payload,
                             index_hint=len(images) + 1,
                             source="user_upload",
@@ -503,22 +298,13 @@ async def upstream_task(
                             continue
                         images.append(image)
                         live["uploaded_images"] = images
-                        memory = live.get("conversation_memory", [])
-                        if isinstance(memory, list):
-                            _append_memory_entry(
-                                memory,
-                                kind="uploaded_image",
-                                text=f'{image["label"]}: {image["name"]}',
-                                source="user_upload",
-                                meta={"label": image["label"], "url": image["url"]},
-                            )
                         session = await session_service.get_session(
                             app_name=APP_NAME,
                             user_id=user_id,
                             session_id=session_id,
                         )
                         if session is not None:
-                            session.state["uploaded_images"] = images
+                            session.state["uploaded_images"] = list(images)
                         logger.info(
                             "Tracked uploaded image: %s (%s) -> %s",
                             image["label"],
@@ -651,14 +437,11 @@ async def downstream_task(
                         is_partial = getattr(event, "partial", True)
                         if input_text:
                             if not speech_turn_open:
-                                turn_id = await record_user_turn(
+                                await record_user_turn(
                                     session_id,
                                     source="speech",
                                     text=input_text,
                                 )
-                                live = _live_state_registry.get(session_id)
-                                if live is not None:
-                                    live["_open_speech_turn_id"] = turn_id
                                 speech_turn_open = True
                             elif not is_partial:
                                 live = _live_state_registry.get(session_id)
@@ -667,26 +450,6 @@ async def downstream_task(
 
                             if not is_partial:
                                 transcript.append(f"user: {input_text}")
-                                live = _live_state_registry.get(session_id)
-                                if live is not None:
-                                    memory = live.get("conversation_memory", [])
-                                    turn_id = live.pop("_open_speech_turn_id", None)
-                                    if isinstance(memory, list):
-                                        _append_memory_entry(
-                                            memory,
-                                            kind="user_turn",
-                                            text=input_text,
-                                            source="speech",
-                                            turn_id=turn_id if isinstance(turn_id, int) else None,
-                                        )
-                                        if _looks_like_explicit_approval(input_text):
-                                            _append_memory_entry(
-                                                memory,
-                                                kind="approval",
-                                                text=input_text,
-                                                source="speech",
-                                                turn_id=turn_id if isinstance(turn_id, int) else None,
-                                            )
                                 speech_turn_open = False
 
                         if (
@@ -694,25 +457,11 @@ async def downstream_task(
                             and event.output_transcription.text
                             and not getattr(event, "partial", True)
                         ):
-                            assistant_text = event.output_transcription.text
                             transcript.append(
-                                f"assistant: {assistant_text}"
+                                f"assistant: {event.output_transcription.text}"
                             )
-                            live = _live_state_registry.get(session_id)
-                            if live is not None:
-                                memory = live.get("conversation_memory", [])
-                                if isinstance(memory, list):
-                                    _append_memory_entry(
-                                        memory,
-                                        kind="assistant_turn",
-                                        text=assistant_text,
-                                        source="assistant",
-                                    )
 
                         if getattr(event, "turn_complete", False):
-                            live = _live_state_registry.get(session_id)
-                            if live is not None:
-                                live.pop("_open_speech_turn_id", None)
                             speech_turn_open = False
 
                 return
@@ -767,11 +516,10 @@ async def websocket_endpoint(
     session_start = time.monotonic()
     last_activity: list[float] = [session_start]
 
-    session.state["_conversation_transcript"] = live_request_queue._transcript
     raw_uploaded_images = session.state.get("uploaded_images", [])
     normalized_uploaded_images: list[dict[str, str]] = []
     for index, raw_image in enumerate(raw_uploaded_images, start=1):
-        image = _normalize_uploaded_image_record(
+        image = normalize_uploaded_image_record(
             raw_image,
             index_hint=index,
             source="user_upload",
@@ -779,45 +527,19 @@ async def websocket_endpoint(
         if image is not None:
             normalized_uploaded_images.append(image)
     session.state["uploaded_images"] = normalized_uploaded_images
-    conversation_memory = _normalize_conversation_memory(
-        session.state.get("conversation_memory", [])
-    )
-    session.state["conversation_memory"] = conversation_memory
-    recent_code_runs = _normalize_recent_code_runs(
-        session.state.get("recent_code_runs", [])
-    )
-    session.state["recent_code_runs"] = recent_code_runs
-    latest_user_entry = _latest_user_memory_entry(conversation_memory)
-    latest_user_text = ""
-    latest_user_source: str | None = None
-    if latest_user_entry is not None:
-        latest_user_text = _clean_text(latest_user_entry.get("text"))
-        source = latest_user_entry.get("source")
-        if isinstance(source, str) and source:
-            latest_user_source = source
 
     # Register all live state directly so the code agent can access them
     # without going through ADK's state proxy (which may copy/snapshot values,
     # losing list references and callables).
     live_state = {
-        "session_state": session.state,
         "transcript": live_request_queue._transcript,
-        "conversation_memory": conversation_memory,
-        "recent_code_runs": recent_code_runs,
         "emit_client_event": live_request_queue.emit_client_event,
         "code_files": session.state.get("code_files", []),
         "uploaded_images": session.state.get("uploaded_images", []),
         "latest_frame": None,
         "latest_frame_mime": "image/jpeg",
-        "latest_image_generation_frame": session.state.get(
-            "_latest_image_generation_frame"
-        ),
-        "latest_image_generation_frame_mime": session.state.get(
-            "_latest_image_generation_frame_mime",
-            "image/png",
-        ),
-        "latest_user_turn_text": latest_user_text,
-        "latest_user_turn_source": latest_user_source,
+        "latest_image_generation_frame": None,
+        "latest_image_generation_frame_mime": "image/png",
     }
     register_live_state(session_id, live_state)
 
@@ -852,15 +574,6 @@ async def websocket_endpoint(
         #     trigger_tokens=100000,
         #     sliding_window=types.SlidingWindow(target_tokens=80000),
         # ),
-    )
-
-    # Trigger the agent immediately so it greets the user on connection.
-    first_input_event.set()
-    live_request_queue.send_content(
-        types.Content(
-            role="user",
-            parts=[types.Part(text="[Session started]")],
-        )
     )
 
     up = asyncio.create_task(

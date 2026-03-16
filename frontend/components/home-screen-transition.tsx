@@ -6,7 +6,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 
@@ -25,6 +24,7 @@ type HomeScreenTransitionState = {
   id: number;
   phase: HomeScreenTransitionPhase;
   backgroundImageSrc: string | null;
+  lastBackgroundImageSrc: string | null;
 };
 
 type HomeScreenTransitionContextValue = {
@@ -233,13 +233,7 @@ function HomeScreenTransitionOverlay({
   const maskId = `home-screen-transition-mask-${transitionId}`;
 
   useEffect(() => {
-    if (phase === "idle") {
-      setProgress(0);
-      return;
-    }
-
     if (phase !== "revealing") {
-      setProgress(0);
       return;
     }
 
@@ -247,9 +241,11 @@ function HomeScreenTransitionOverlay({
       typeof window !== "undefined" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches
     ) {
-      setProgress(1);
+      const reducedMotionFrameId = window.requestAnimationFrame(() => {
+        setProgress(1);
+      });
       onRevealFinished();
-      return;
+      return () => window.cancelAnimationFrame(reducedMotionFrameId);
     }
 
     let frameId = 0;
@@ -282,16 +278,17 @@ function HomeScreenTransitionOverlay({
     return null;
   }
 
-  const revealLength = progress * 100;
+  const renderProgress = phase === "revealing" ? progress : 0;
+  const revealLength = renderProgress * 100;
   const leadingEdgeStart = Math.max(revealLength - LEADING_EDGE_LENGTH, 0);
   const leadingEdgeVisibleLength = Math.min(revealLength, LEADING_EDGE_LENGTH);
-  const bottomLeftRevealLength = getWindowedReveal(progress, 0.34, 0.54);
-  const topRightRevealLength = getWindowedReveal(progress, 0.56, 0.76);
+  const bottomLeftRevealLength = getWindowedReveal(renderProgress, 0.34, 0.54);
+  const topRightRevealLength = getWindowedReveal(renderProgress, 0.56, 0.76);
   const bottomLeftPocketProgress = applyEase(
-    getWindowedProgress(progress, 0.3, 0.56),
+    getWindowedProgress(renderProgress, 0.3, 0.56),
   );
   const topRightPocketProgress = applyEase(
-    getWindowedProgress(progress, 0.56, 0.78),
+    getWindowedProgress(renderProgress, 0.56, 0.78),
   );
   const bottomLeftPocketCenterX = viewport.width * 0.275;
   const bottomLeftPocketCenterY = viewport.height * 0.91;
@@ -434,19 +431,15 @@ export function HomeScreenTransitionProvider({
     id: 0,
     phase: "idle",
     backgroundImageSrc: null,
+    lastBackgroundImageSrc: null,
   });
-  // Keep the last-used background image src so we can preload it persistently
-  // across page navigations (the provider never unmounts).
-  const lastBgSrcRef = useRef<string | null>(null);
-  if (transition.backgroundImageSrc) {
-    lastBgSrcRef.current = transition.backgroundImageSrc;
-  }
 
   const beginHomeTransition = useCallback((backgroundImageSrc: string) => {
     setTransition((previous) => ({
       id: previous.id + 1,
       phase: "holding",
       backgroundImageSrc,
+      lastBackgroundImageSrc: backgroundImageSrc,
     }));
   }, []);
 
@@ -516,12 +509,12 @@ export function HomeScreenTransitionProvider({
         transitionId={transition.id}
       />
       {/* Persistent preload: keeps the background image decoded across navigations */}
-      {lastBgSrcRef.current ? (
+      {transition.lastBackgroundImageSrc ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
           aria-hidden="true"
           alt=""
-          src={lastBgSrcRef.current}
+          src={transition.lastBackgroundImageSrc}
           decoding="sync"
           className="pointer-events-none fixed -z-50 h-0 w-0 opacity-0"
         />

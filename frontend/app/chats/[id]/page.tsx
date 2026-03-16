@@ -40,10 +40,8 @@ export default function Page() {
 
   const { phase: homeTransitionPhase, revealHomeTransition } =
     useHomeScreenTransition();
-  const [activeTab, setActiveTab] = useState<"code" | "preview">("preview");
   const [allFiles, setAllFiles] = useState<CodeFile[]>([]);
   const [, setIsAgentPlaybackActive] = useState(false);
-  const [isRecordingActive, setIsRecordingActive] = useState(false);
   const [shouldRenderBottomBar, setShouldRenderBottomBar] = useState(
     homeTransitionPhase === "idle",
   );
@@ -54,6 +52,7 @@ export default function Page() {
   const mountedRef = useRef(false);
   const allFilesRef = useRef<CodeFile[]>([]);
   const previewRenderVersionRef = useRef(0);
+  const sessionStartTimeoutRef = useRef<number | null>(null);
 
   // Direct ref to AudioPlayer -- avoids stale closure issues
   const playerRef = useRef<AudioPlayer | null>(null);
@@ -113,8 +112,6 @@ export default function Page() {
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop();
     recorderRef.current = null;
-    setIsRecordingActive(false);
-    voiceControlsRef.current?.resetUserAudio();
   }, []);
 
   const startRecording = useCallback(async () => {
@@ -125,21 +122,14 @@ export default function Page() {
     recorderRef.current = recorder;
 
     try {
-      await recorder.start(
-        (pcmBuffer: ArrayBuffer) => {
-          sendAudio(pcmBuffer);
-        },
-        (level: number) => {
-          voiceControlsRef.current?.pushUserAudioLevel(level);
-        },
-      );
-      setIsRecordingActive(true);
+      await recorder.start((pcmBuffer: ArrayBuffer) => {
+        sendAudio(pcmBuffer);
+      });
     } catch (err) {
       if (recorderRef.current === recorder) {
         recorderRef.current = null;
       }
       recorder.stop();
-      voiceControlsRef.current?.resetUserAudio();
       console.error("Mic access denied:", err);
     }
   }, [sendAudio]);
@@ -160,7 +150,6 @@ export default function Page() {
 
       allFilesRef.current = nextFiles;
       setAllFiles(nextFiles);
-      setActiveTab((prev) => (prev === "preview" ? prev : "preview"));
 
       const nextRenderVersion = previewRenderVersionRef.current + 1;
       previewRenderVersionRef.current = nextRenderVersion;
@@ -264,6 +253,10 @@ export default function Page() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (sessionStartTimeoutRef.current !== null) {
+        window.clearTimeout(sessionStartTimeoutRef.current);
+        sessionStartTimeoutRef.current = null;
+      }
       stopRecording();
       void playerRef.current?.close();
       playerRef.current = null;
@@ -274,6 +267,10 @@ export default function Page() {
   // Init player and start mic once connected
   useEffect(() => {
     if (connectionState !== "connected") {
+      if (sessionStartTimeoutRef.current !== null) {
+        window.clearTimeout(sessionStartTimeoutRef.current);
+        sessionStartTimeoutRef.current = null;
+      }
       setIsAgentPlaybackActive(false);
       stopRecording();
       return;
@@ -281,6 +278,7 @@ export default function Page() {
 
     if (recorderRef.current) return;
 
+    let cancelled = false;
     void (async () => {
       try {
         if (!playerRef.current) {
@@ -296,12 +294,30 @@ export default function Page() {
           playerRef.current = player;
         }
 
+        await new Promise<void>((resolve) => {
+          sessionStartTimeoutRef.current = window.setTimeout(() => {
+            sessionStartTimeoutRef.current = null;
+            if (!cancelled) {
+              sendText("[Session started]");
+            }
+            resolve();
+          }, 150);
+        });
+
         await startRecording();
       } catch (err) {
         console.error("Audio initialization failed:", err);
       }
     })();
-  }, [connectionState, startRecording, stopRecording]);
+
+    return () => {
+      cancelled = true;
+      if (sessionStartTimeoutRef.current !== null) {
+        window.clearTimeout(sessionStartTimeoutRef.current);
+        sessionStartTimeoutRef.current = null;
+      }
+    };
+  }, [connectionState, sendText, startRecording, stopRecording]);
 
   const handlePreviewRendered = useCallback((renderVersion: number) => {
     setRenderedPreviewVersion((current) => Math.max(current, renderVersion));
@@ -334,8 +350,6 @@ export default function Page() {
       <div className="absolute inset-0">
         <CodeViewer
           files={allFiles}
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
           onClose={() => {}}
           pauseFrameStreaming={false}
           sendImage={sendImage}
@@ -351,13 +365,11 @@ export default function Page() {
           previewRenderVersion={previewRenderVersion}
           onPreviewRendered={handlePreviewRendered}
           onPreviewFailed={handlePreviewFailed}
-          codeJobStatus={codeJob?.status ?? null}
           sessionId={sessionId}
           voiceControls={
             <BottomBarVoiceControls
               ref={voiceControlsRef}
               isConnected={connectionState === "connected"}
-              isRecording={isRecordingActive}
             />
           }
         />

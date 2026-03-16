@@ -75,11 +75,3 @@ export function getExtensionForLanguage(language: string): string {
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
-
-export function toTitleCase(rawName: string): string {
-  const parts = rawName.split(/[-_]+/);
-
-  return parts
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-    .join(" ");
-}

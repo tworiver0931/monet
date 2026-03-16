@@ -1,10 +1,8 @@
-"""Shared utility functions for code extraction and formatting."""
+"""Shared utility functions for code formatting and file application."""
 
 from __future__ import annotations
 
-import re
-
-_CODE_BLOCK_PATTERN = re.compile(r"```(\w+)\{path=([^}]+)\}\n([\s\S]*?)```")
+import uuid
 
 _EXT_TO_LANG: dict[str, str] = {
     ".tsx": "tsx",
@@ -22,35 +20,6 @@ def lang_from_path(path: str) -> str:
         lang = _EXT_TO_LANG.get(ext)
         if lang is not None:
             return lang
-    return "tsx"
-
-
-def extract_code_files_from_text(text: str) -> list[dict] | None:
-    """Parse fenced code blocks with ``{path=...}`` annotations."""
-    matches = _CODE_BLOCK_PATTERN.findall(text)
-    if not matches:
-        return None
-    return [
-        {"language": lang, "path": path, "code": code.rstrip()}
-        for lang, path, code in matches
-    ]
-
-
-def extract_result_text_from_function_response(function_response) -> str | None:
-    """Extract text payload from a function response part."""
-    if not function_response:
-        return None
-
-    response = getattr(function_response, "response", None)
-    if isinstance(response, dict):
-        result = response.get("result")
-        if isinstance(result, str):
-            return result
-        return None
-
-    if isinstance(response, str):
-        return response
-
     return None
 
 
@@ -63,6 +32,57 @@ def format_files_as_code_blocks(files: list[dict]) -> str:
         code = f["code"]
         blocks.append(f"```{lang}{{path={path}}}\n{code}\n```")
     return "\n\n".join(blocks)
+
+
+def normalize_uploaded_image_record(
+    payload: object,
+    *,
+    default_name: str = "uploaded_image",
+    index_hint: int | None = None,
+    source: str = "user_upload",
+) -> dict[str, str] | None:
+    """Return a normalized uploaded-image record or ``None``."""
+    next_index = index_hint or 1
+
+    if isinstance(payload, str) and payload:
+        return {
+            "id": uuid.uuid4().hex,
+            "label": f"Image {next_index}",
+            "name": f"{default_name}-{next_index}",
+            "url": payload,
+            "source": source,
+        }
+
+    if not isinstance(payload, dict):
+        return None
+
+    url = payload.get("url", "")
+    if not isinstance(url, str) or not url:
+        return None
+
+    name = payload.get("name", default_name)
+    if not isinstance(name, str) or not name:
+        name = default_name
+
+    label = payload.get("label", "")
+    if not isinstance(label, str) or not label:
+        label = f"Image {next_index}"
+
+    image_id = payload.get("id", "")
+    if not isinstance(image_id, str) or not image_id:
+        image_id = uuid.uuid4().hex
+
+    image_source = payload.get("source", source)
+    if not isinstance(image_source, str) or not image_source:
+        image_source = source
+
+    return {
+        "id": image_id,
+        "label": label,
+        "name": name,
+        "url": url,
+        "source": image_source,
+    }
 
 
 def apply_file_actions(

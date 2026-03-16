@@ -11,7 +11,6 @@ _HOW_YOU_WORK_PLACEHOLDER = "{{HOW_YOU_WORK_SECTION}}"
 
 _REQUIRED_CODE_AGENT_SECTIONS = {
     "## Screen Context",
-    "## Request Context",
     "## Rules",
 }
 
@@ -29,9 +28,8 @@ You can manage files in a React codebase with these tools:
 Workflow:
 
 1. Use `edit_file` for surgical updates and `write_file` for new files or full rewrites.
-2. Treat the approved plan and requested changes as the highest-priority request context.
-3. Preserve working parts of the app unless the request implies a redesign.
-4. After making changes, respond with a brief natural-language summary. Do not mention code details in that summary.
+2. Preserve working parts of the app unless the request implies a redesign.
+3. After making changes, respond with a brief natural-language summary. Do not mention code details in that summary.
 """
 
 
@@ -57,7 +55,6 @@ Each action in the `actions` array must be one of:
 ## Guidelines
 
 - Include ONLY files that need to change. Unchanged files should be omitted.
-- Follow the approved plan and requested changes first; use recent conversation memory only to resolve follow-up intent.
 - For `create` and `edit`, the `code` field must contain the COMPLETE file contents — no placeholders, no truncation, no partial snippets.
 - The `summary` field should be a brief, non-technical description of what you did.
 """

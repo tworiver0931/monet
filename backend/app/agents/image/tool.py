@@ -354,7 +354,6 @@ async def generate_image(
                 "url": url,
                 "name": file_name,
                 "mimeType": mime_type,
-                "data": data_b64,
             },
         )
 

@@ -111,10 +111,6 @@ export class AudioRecorder {
     return int16;
   }
 
-  get isRecording(): boolean {
-    return this.audioContext !== null && this.audioContext.state === "running";
-  }
-
   private startLevelMonitoring(): void {
     if (!this.analyserNode || !this.analyserData) return;
 

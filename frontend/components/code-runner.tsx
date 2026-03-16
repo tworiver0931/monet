@@ -1,7 +1,6 @@
 import CodeRunnerReact from "./code-runner-react";
 
 export default function CodeRunner({
-  language,
   code,
   files,
   onRequestFix,
@@ -13,7 +12,6 @@ export default function CodeRunner({
   showBuiltInErrorScreen,
   reportRuntimeErrors,
 }: {
-  language?: string;
   code?: string;
   files?: Array<{ path: string; content: string }>;
   onRequestFix?: (e: string) => void;

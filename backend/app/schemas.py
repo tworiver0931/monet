@@ -1,6 +1,4 @@
-"""
-Pydantic models for the WebSocket message protocol between frontend and backend.
-"""
+"""Pydantic models for deployment request and response payloads."""
 
 from __future__ import annotations
 
