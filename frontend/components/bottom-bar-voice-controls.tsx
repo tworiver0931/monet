@@ -14,7 +14,8 @@ import { AgentAudioVisualizerAura } from "@/components/agents-ui/agent-audio-vis
 
 const USER_ACTIVITY_FLOOR = 0.035;
 const AGENT_ACTIVITY_FLOOR = 0.03;
-const ACTIVE_HOLD_MS = 120;
+const USER_ACTIVE_HOLD_MS = 120;
+const AGENT_ACTIVE_HOLD_MS = 480;
 const SPEAKING_RELEASE_MS = 260;
 const THINKING_WINDOW_MS = 1400;
 const ATTACK_LERP = 0.8;
@@ -44,23 +45,8 @@ function smoothLevel(current: number, target: number) {
   return next < MIN_LEVEL ? 0 : next;
 }
 
-function getVisualizerTone(state: AgentState): {
-  color: `#${string}`;
-  colorShift: number;
-} {
-  switch (state) {
-    case "listening":
-      return { color: "#f97316", colorShift: 0.12 };
-    case "thinking":
-    case "connecting":
-    case "initializing":
-      return { color: "#8b5cf6", colorShift: 0.22 };
-    case "speaking":
-      return { color: "#06b6d4", colorShift: 0.08 };
-    default:
-      return { color: "#64748b", colorShift: 0.04 };
-  }
-}
+const VISUALIZER_COLOR: `#${string}` = "#06b6d4";
+const VISUALIZER_COLOR_SHIFT = 0.05;
 
 export const BottomBarVoiceControls = forwardRef<
   BottomBarVoiceControlsHandle,
@@ -216,7 +202,7 @@ export const BottomBarVoiceControls = forwardRef<
 
     const hasRecentAgentAudio =
       frame.agentLevel > AGENT_ACTIVITY_FLOOR ||
-      frame.now - lastAgentActivityAtRef.current < ACTIVE_HOLD_MS;
+      frame.now - lastAgentActivityAtRef.current < AGENT_ACTIVE_HOLD_MS;
     if (hasRecentAgentAudio) {
       return "speaking";
     }
@@ -224,7 +210,7 @@ export const BottomBarVoiceControls = forwardRef<
     const hasRecentUserAudio =
       isRecording &&
       (frame.userLevel > USER_ACTIVITY_FLOOR ||
-        frame.now - lastUserActivityAtRef.current < ACTIVE_HOLD_MS);
+        frame.now - lastUserActivityAtRef.current < USER_ACTIVE_HOLD_MS);
     if (hasRecentUserAudio) {
       return "listening";
     }
@@ -245,15 +231,21 @@ export const BottomBarVoiceControls = forwardRef<
       speakingReleaseTimeoutRef.current = null;
     }
 
+    // Immediate transitions: entering speaking or connecting
     if (
       targetVisualizerState === "speaking" ||
-      targetVisualizerState === "connecting" ||
-      visualizerState !== "speaking"
+      targetVisualizerState === "connecting"
     ) {
       setVisualizerState(targetVisualizerState);
       return;
     }
 
+    // Same state — nothing to do
+    if (targetVisualizerState === visualizerState) {
+      return;
+    }
+
+    // Debounce all other transitions to prevent rapid cycling
     speakingReleaseTimeoutRef.current = window.setTimeout(() => {
       setVisualizerState(targetVisualizerState);
       speakingReleaseTimeoutRef.current = null;
@@ -267,10 +259,8 @@ export const BottomBarVoiceControls = forwardRef<
     };
   }, [targetVisualizerState, visualizerState]);
 
-  const { color, colorShift } = useMemo(
-    () => getVisualizerTone(visualizerState),
-    [visualizerState],
-  );
+  const color = VISUALIZER_COLOR;
+  const colorShift = VISUALIZER_COLOR_SHIFT;
   const activeAudioLevel =
     visualizerState === "speaking" ? frame.agentLevel : frame.userLevel;
 

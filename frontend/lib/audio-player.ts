@@ -46,7 +46,7 @@ export class AudioPlayer {
     };
     this.analyserNode = this.audioContext.createAnalyser();
     this.analyserNode.fftSize = 256;
-    this.analyserNode.smoothingTimeConstant = 0.08;
+    this.analyserNode.smoothingTimeConstant = 0.6;
     this.analyserData = new Uint8Array<ArrayBuffer>(
       new ArrayBuffer(this.analyserNode.frequencyBinCount),
     );
@@ -64,11 +64,17 @@ export class AudioPlayer {
       await this.audioContext.resume();
     }
 
+    // Restart level monitoring if it was stopped
+    if (this.analyserFrameId === null && this.throttleInterval === null) {
+      this.startLevelMonitoring();
+    }
+
     const int16Data = new Int16Array(pcmData);
     this.workletNode.port.postMessage(int16Data);
   }
 
   stop(): void {
+    this.stopLevelMonitoring();
     if (this.workletNode) {
       this.workletNode.port.postMessage("endOfAudio");
     }
@@ -78,14 +84,6 @@ export class AudioPlayer {
 
   async close(): Promise<void> {
     this.stop();
-    if (this.throttleInterval !== null) {
-      clearInterval(this.throttleInterval);
-      this.throttleInterval = null;
-    }
-    if (this.analyserFrameId !== null) {
-      cancelAnimationFrame(this.analyserFrameId);
-      this.analyserFrameId = null;
-    }
     this.analyserNode?.disconnect();
     this.workletNode?.disconnect();
     if (this.audioContext?.state !== "closed") {
@@ -98,6 +96,17 @@ export class AudioPlayer {
     this.onLevel = null;
     this.onPlaybackState = null;
     this.initialized = false;
+  }
+
+  private stopLevelMonitoring(): void {
+    if (this.throttleInterval !== null) {
+      clearInterval(this.throttleInterval);
+      this.throttleInterval = null;
+    }
+    if (this.analyserFrameId !== null) {
+      cancelAnimationFrame(this.analyserFrameId);
+      this.analyserFrameId = null;
+    }
   }
 
   private startLevelMonitoring(): void {
