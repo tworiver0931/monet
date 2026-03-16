@@ -44,6 +44,8 @@ export const BottomBarVoiceControls = forwardRef<
   BottomBarVoiceControlsProps
 >(function BottomBarVoiceControls({ isConnected }, ref) {
   const agentLevelRef = useRef(0);
+  const lastRenderedLevelRef = useRef(0);
+  const lastRenderedAtRef = useRef(0);
   const [agentLevel, setAgentLevel] = useState(0);
 
   useImperativeHandle(
@@ -53,11 +55,27 @@ export const BottomBarVoiceControls = forwardRef<
       pushAgentAudioLevel(level) {
         const nextLevel = smoothLevel(agentLevelRef.current, clampLevel(level));
         agentLevelRef.current = nextLevel;
+
+        const now = performance.now();
+        const levelDelta = Math.abs(nextLevel - lastRenderedLevelRef.current);
+        const shouldRender =
+          levelDelta >= 0.025 ||
+          now - lastRenderedAtRef.current >= 33 ||
+          nextLevel === 0;
+
+        if (!shouldRender) {
+          return;
+        }
+
+        lastRenderedLevelRef.current = nextLevel;
+        lastRenderedAtRef.current = now;
         setAgentLevel(nextLevel);
       },
       resetUserAudio() {},
       resetAgentAudio() {
         agentLevelRef.current = 0;
+        lastRenderedLevelRef.current = 0;
+        lastRenderedAtRef.current = 0;
         setAgentLevel(0);
       },
     }),
@@ -67,6 +85,8 @@ export const BottomBarVoiceControls = forwardRef<
   useEffect(() => {
     if (!isConnected) {
       agentLevelRef.current = 0;
+      lastRenderedLevelRef.current = 0;
+      lastRenderedAtRef.current = 0;
       setAgentLevel(0);
     }
   }, [isConnected]);

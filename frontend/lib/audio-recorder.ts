@@ -121,7 +121,18 @@ export class AudioRecorder {
     let idleFrameCount = 0;
     const IDLE_THRESHOLD = 30;
 
-    const computeLevel = () => {
+    const scheduleAnimationFrame = () => {
+      if (this.analyserFrameId !== null) {
+        return;
+      }
+
+      this.analyserFrameId = requestAnimationFrame(() => {
+        this.analyserFrameId = null;
+        computeLevel("frame");
+      });
+    };
+
+    const computeLevel = (source: "frame" | "interval") => {
       if (!this.analyserNode || !this.analyserData) return;
 
       this.analyserNode.getByteFrequencyData(this.analyserData);
@@ -136,13 +147,22 @@ export class AudioRecorder {
 
       if (level < 0.005) {
         idleFrameCount++;
-        if (idleFrameCount > IDLE_THRESHOLD && !this.throttleInterval) {
+        if (idleFrameCount > IDLE_THRESHOLD) {
+          if (source === "interval") {
+            return;
+          }
+
           if (this.analyserFrameId !== null) {
             cancelAnimationFrame(this.analyserFrameId);
             this.analyserFrameId = null;
           }
+
+          if (this.throttleInterval !== null) {
+            return;
+          }
+
           this.throttleInterval = setInterval(() => {
-            computeLevel();
+            computeLevel("interval");
           }, 100);
           return;
         }
@@ -154,9 +174,9 @@ export class AudioRecorder {
         }
       }
 
-      this.analyserFrameId = requestAnimationFrame(computeLevel);
+      scheduleAnimationFrame();
     };
 
-    this.analyserFrameId = requestAnimationFrame(computeLevel);
+    scheduleAnimationFrame();
   }
 }

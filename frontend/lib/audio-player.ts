@@ -115,7 +115,18 @@ export class AudioPlayer {
     let idleFrameCount = 0;
     const IDLE_THRESHOLD = 30; // ~0.5s at 60fps before throttling
 
-    const computeLevel = () => {
+    const scheduleAnimationFrame = () => {
+      if (this.analyserFrameId !== null) {
+        return;
+      }
+
+      this.analyserFrameId = requestAnimationFrame(() => {
+        this.analyserFrameId = null;
+        computeLevel("frame");
+      });
+    };
+
+    const computeLevel = (source: "frame" | "interval") => {
       if (!this.analyserNode || !this.analyserData) return;
 
       this.analyserNode.getByteFrequencyData(this.analyserData);
@@ -130,14 +141,23 @@ export class AudioPlayer {
 
       if (level < 0.005) {
         idleFrameCount++;
-        if (idleFrameCount > IDLE_THRESHOLD && !this.throttleInterval) {
-          // Switch to throttled polling when idle
+        if (idleFrameCount > IDLE_THRESHOLD) {
+          if (source === "interval") {
+            return;
+          }
+
+          // Switch to throttled polling when idle.
           if (this.analyserFrameId !== null) {
             cancelAnimationFrame(this.analyserFrameId);
             this.analyserFrameId = null;
           }
+
+          if (this.throttleInterval !== null) {
+            return;
+          }
+
           this.throttleInterval = setInterval(() => {
-            computeLevel();
+            computeLevel("interval");
           }, 100); // 10fps when idle
           return;
         }
@@ -149,9 +169,9 @@ export class AudioPlayer {
         }
       }
 
-      this.analyserFrameId = requestAnimationFrame(computeLevel);
+      scheduleAnimationFrame();
     };
 
-    this.analyserFrameId = requestAnimationFrame(computeLevel);
+    scheduleAnimationFrame();
   }
 }
