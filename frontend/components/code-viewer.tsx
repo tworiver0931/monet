@@ -1012,105 +1012,113 @@ export default function CodeViewer({
     <div className="relative h-full w-full">
       {/* Bottom bar with glass surface */}
       {renderBottomBar ? (
-        <div
-          className={`pointer-events-auto absolute bottom-6 left-1/2 z-30 -translate-x-1/2 transform-gpu transition-all duration-500 ease-out ${
-            bottomBarVisible
-              ? "translate-y-0 opacity-100 blur-0"
-              : "translate-y-4 opacity-0 blur-sm"
-          }`}
-        >
-          <GlassSurface
-            width={360}
-            height={65}
-            borderRadius={999}
-            blur={16}
-            brightness={40}
-            opacity={0.92}
-            backgroundOpacity={0.82}
-            saturation={1.2}
-            style={{
-              boxShadow:
-                "0 10px 30px rgba(15,23,42,0.16), inset 0 0.5px 0 rgba(255,255,255,0.45)",
-              border: "1px solid rgba(255,255,255,0.24)",
-            }}
+        <>
+          {voiceControls && (
+            <div
+              className={`pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center transition-all duration-500 ease-out ${
+                bottomBarVisible
+                  ? "translate-y-0 opacity-100 blur-0"
+                  : "translate-y-4 opacity-0 blur-sm"
+              }`}
+            >
+              {voiceControls}
+            </div>
+          )}
+          <div
+            className={`pointer-events-auto absolute bottom-6 left-1/2 z-30 -translate-x-1/2 transform-gpu transition-all duration-500 ease-out ${
+              bottomBarVisible
+                ? "translate-y-0 opacity-100 blur-0"
+                : "translate-y-4 opacity-0 blur-sm"
+            }`}
           >
-            <div className="flex items-center gap-2">
-              <Tooltip label={cursorTooltip}>
-                <button
-                  type="button"
-                  className={cn(
-                    BOTTOM_BAR_BUTTON_BASE_CLASS,
-                    isCursorActive && BOTTOM_BAR_BUTTON_ACTIVE_CLASS,
-                  )}
-                  onClick={handleCursorClick}
-                >
-                  <MousePointer2 size={14} />
-                </button>
-              </Tooltip>
-              {TOOLS.map(({ mode, icon, title }) => (
-                <Tooltip key={mode} label={title}>
+            <GlassSurface
+              width={344}
+              height={65}
+              borderRadius={999}
+              blur={16}
+              brightness={40}
+              opacity={0.92}
+              backgroundOpacity={0.82}
+              saturation={1.2}
+              style={{
+                boxShadow:
+                  "0 10px 30px rgba(15,23,42,0.16), inset 0 0.5px 0 rgba(255,255,255,0.45)",
+                border: "1px solid rgba(255,255,255,0.24)",
+              }}
+            >
+              <div className="flex items-center gap-2">
+                <Tooltip label={cursorTooltip}>
                   <button
                     type="button"
                     className={cn(
                       BOTTOM_BAR_BUTTON_BASE_CLASS,
-                      annotationMode === mode && BOTTOM_BAR_BUTTON_ACTIVE_CLASS,
-                      isCanvasEditLocked && "cursor-not-allowed opacity-40",
+                      isCursorActive && BOTTOM_BAR_BUTTON_ACTIVE_CLASS,
                     )}
-                    onClick={() => setAnnotationMode(mode)}
-                    disabled={isCanvasEditLocked}
+                    onClick={handleCursorClick}
                   >
-                    {icon}
+                    <MousePointer2 size={14} />
                   </button>
                 </Tooltip>
-              ))}
-              <Tooltip label="Create image">
-                <button
-                  type="button"
-                  onClick={handleGenerationFrameClick}
-                  disabled={isCanvasEditLocked}
-                  className={cn(
-                    BOTTOM_BAR_BUTTON_BASE_CLASS,
-                    annotationMode === "frame" &&
-                      BOTTOM_BAR_BUTTON_ACTIVE_CLASS,
-                    isCanvasEditLocked && "cursor-not-allowed opacity-40",
-                  )}
-                >
-                  <ImagePlus size={14} />
-                </button>
-              </Tooltip>
-              <Tooltip label="Upload image">
-                <button
-                  type="button"
-                  onClick={handleUploadClick}
-                  disabled={isCanvasEditLocked}
-                  className={cn(
-                    BOTTOM_BAR_BUTTON_BASE_CLASS,
-                    isCanvasEditLocked && "cursor-not-allowed opacity-40",
-                  )}
-                >
-                  <Paperclip size={14} />
-                </button>
-              </Tooltip>
-              {sessionId && files.length > 0 && (
-                <Tooltip label="Deploy & share">
+                {TOOLS.map(({ mode, icon, title }) => (
+                  <Tooltip key={mode} label={title}>
+                    <button
+                      type="button"
+                      className={cn(
+                        BOTTOM_BAR_BUTTON_BASE_CLASS,
+                        annotationMode === mode &&
+                          BOTTOM_BAR_BUTTON_ACTIVE_CLASS,
+                        isCanvasEditLocked && "cursor-not-allowed opacity-40",
+                      )}
+                      onClick={() => setAnnotationMode(mode)}
+                      disabled={isCanvasEditLocked}
+                    >
+                      {icon}
+                    </button>
+                  </Tooltip>
+                ))}
+                <Tooltip label="Create image">
                   <button
                     type="button"
-                    onClick={() => setShowDeployModal(true)}
-                    className={BOTTOM_BAR_BUTTON_BASE_CLASS}
+                    onClick={handleGenerationFrameClick}
+                    disabled={isCanvasEditLocked}
+                    className={cn(
+                      BOTTOM_BAR_BUTTON_BASE_CLASS,
+                      annotationMode === "frame" &&
+                        BOTTOM_BAR_BUTTON_ACTIVE_CLASS,
+                      isCanvasEditLocked && "cursor-not-allowed opacity-40",
+                    )}
                   >
-                    <Rocket size={14} />
+                    <ImagePlus size={14} />
                   </button>
                 </Tooltip>
-              )}
-              {voiceControls && (
-                <>
-                  <div className="mx-1 h-6 w-px bg-white/35" />
-                  <div className="flex items-center gap-2">{voiceControls}</div>
-                </>
-              )}
-            </div>
-          </GlassSurface>
-        </div>
+                <Tooltip label="Upload image">
+                  <button
+                    type="button"
+                    onClick={handleUploadClick}
+                    disabled={isCanvasEditLocked}
+                    className={cn(
+                      BOTTOM_BAR_BUTTON_BASE_CLASS,
+                      isCanvasEditLocked && "cursor-not-allowed opacity-40",
+                    )}
+                  >
+                    <Paperclip size={14} />
+                  </button>
+                </Tooltip>
+                {sessionId && files.length > 0 && (
+                  <Tooltip label="Deploy & share">
+                    <button
+                      type="button"
+                      onClick={() => setShowDeployModal(true)}
+                      className={BOTTOM_BAR_BUTTON_BASE_CLASS}
+                    >
+                      <Rocket size={14} />
+                    </button>
+                  </Tooltip>
+                )}
+              </div>
+            </GlassSurface>
+          </div>
+        </>
       ) : null}
 
       {/* Sandpack iframe */}
